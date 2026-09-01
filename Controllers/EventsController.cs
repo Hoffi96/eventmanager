@@ -146,6 +146,97 @@ public class EventsController : AuthorizedControllerBase
 
     [Authorize(Roles = "Admin,EventCoordinator")]
     [HttpGet]
+    public async Task<IActionResult> CopyTasks(int id)
+    {
+        var target = await Db.Events
+            .Include(e => e.Tasks)
+            .FirstOrDefaultAsync(e => e.Id == id);
+        if (target == null)
+        {
+            return NotFound();
+        }
+
+        if (!await CanManageEventAsync(id))
+        {
+            return Forbid();
+        }
+
+        var sourceEvents = await Db.Events
+            .Include(e => e.Tasks)
+            .Where(e => e.Id != id && e.Tasks.Any())
+            .OrderByDescending(e => e.StartsAt)
+            .ToListAsync();
+
+        if (!IsAdmin && IsEventCoordinator)
+        {
+            sourceEvents = sourceEvents
+                .Where(e => e.Coordinators.Any(c => c.UserId == CurrentUserId))
+                .ToList();
+        }
+
+        ViewBag.Target = target;
+        return View(sourceEvents);
+    }
+
+    [Authorize(Roles = "Admin,EventCoordinator")]
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> CopyTasks(int id, int sourceEventId)
+    {
+        var target = await Db.Events.FirstOrDefaultAsync(e => e.Id == id);
+        if (target == null)
+        {
+            return NotFound();
+        }
+
+        if (!await CanManageEventAsync(id))
+        {
+            return Forbid();
+        }
+
+        var source = await Db.Events
+            .Include(e => e.Tasks)
+            .FirstOrDefaultAsync(e => e.Id == sourceEventId);
+        if (source == null)
+        {
+            return NotFound();
+        }
+
+        if (source.Id == target.Id)
+        {
+            TempData["Error"] = "Quelle und Ziel dürfen nicht identisch sein.";
+            return RedirectToAction(nameof(CopyTasks), new { id });
+        }
+
+        if (!source.Tasks.Any())
+        {
+            TempData["Error"] = "Die Quell-Veranstaltung enthält keine Tasks.";
+            return RedirectToAction(nameof(CopyTasks), new { id });
+        }
+
+        var offset = target.StartsAt - source.StartsAt;
+        foreach (var task in source.Tasks.OrderBy(t => t.StartsAt))
+        {
+            Db.Tasks.Add(new TaskItem
+            {
+                EventId = target.Id,
+                Title = task.Title,
+                Description = task.Description,
+                StartsAt = task.StartsAt.Add(offset),
+                EndsAt = task.EndsAt.Add(offset),
+                MaxAssignees = task.MaxAssignees,
+                CreatedById = CurrentUserId,
+                CreatedAt = DateTime.UtcNow
+            });
+        }
+
+        await Db.SaveChangesAsync();
+        TempData["Success"] = $"{source.Tasks.Count} Task(s) aus '{source.Name}' übernommen.";
+        return RedirectToAction(nameof(Details), new { id = target.Id });
+    }
+
+    [Authorize(Roles = "Admin,EventCoordinator")]
+    [HttpGet]
     public async Task<IActionResult> Edit(int id)
     {
         var ev = await Db.Events.FindAsync(id);
