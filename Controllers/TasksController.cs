@@ -272,6 +272,13 @@ public class TasksController : AuthorizedControllerBase
         {
             Db.TaskAssignments.Add(new TaskAssignment { TaskId = id, UserId = userId, AssignedAt = DateTime.UtcNow });
             await Db.SaveChangesAsync();
+
+            if (user.NotifyOnAssignment && !string.IsNullOrWhiteSpace(user.Email))
+            {
+                var subject = $"Zuordnung: {task.Title}";
+                var body = $"Hallo {user.Username},\n\ndu wurdest dem Task '{task.Title}' für die Veranstaltung '{task.Event.Name}' zugeordnet.\n\nBeginn: {task.StartsAt.ToLocalTime():dd.MM.yyyy HH:mm}\nEnde: {task.EndsAt.ToLocalTime():dd.MM.yyyy HH:mm}\n\nBitte prüfe bei Bedarf deine Zuordnung in Helfer-Tasks.";
+                await _emailService.SendAsync(user.Email, subject, body);
+            }
         }
         return RedirectToAction(nameof(Details), new { id });
     }

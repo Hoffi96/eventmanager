@@ -1,5 +1,6 @@
 using HelferApp.Data;
 using HelferApp.Models;
+using HelferApp.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -9,8 +10,11 @@ namespace HelferApp.Controllers;
 [Authorize(Roles = "Admin")]
 public class AdminController : AuthorizedControllerBase
 {
-    public AdminController(AppDbContext db) : base(db)
+    private readonly IEmailService _emailService;
+
+    public AdminController(AppDbContext db, IEmailService emailService) : base(db)
     {
+        _emailService = emailService;
     }
 
     public async Task<IActionResult> Users()
@@ -137,6 +141,45 @@ public class AdminController : AuthorizedControllerBase
         await Db.SaveChangesAsync();
         TempData["Success"] = "E-Mail-Einstellungen gespeichert.";
         return View(model);
+    }
+
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> SendTestEmail(string testEmailAddress)
+    {
+        var settings = await Db.AppSettings.FirstOrDefaultAsync() ?? new AppSettings();
+
+        if (string.IsNullOrWhiteSpace(testEmailAddress))
+        {
+            TempData["Error"] = "Bitte eine Empfängeradresse für die Testmail angeben.";
+            return RedirectToAction(nameof(Settings));
+        }
+
+        if (!settings.EmailEnabled)
+        {
+            TempData["Error"] = "Der Mailservice ist deaktiviert. Bitte zuerst aktivieren und speichern.";
+            return RedirectToAction(nameof(Settings));
+        }
+
+        if (string.IsNullOrWhiteSpace(settings.SmtpHost) || string.IsNullOrWhiteSpace(settings.FromAddress))
+        {
+            TempData["Error"] = "Bitte zuerst gültige Mail-Einstellungen speichern.";
+            return RedirectToAction(nameof(Settings));
+        }
+
+        try
+        {
+            var subject = "HelferApp Testmail";
+            var body = $"Dies ist eine Testmail aus der HelferApp.\n\nZeitpunkt: {DateTime.Now:dd.MM.yyyy HH:mm:ss}\nEmpfänger: {testEmailAddress}";
+            await _emailService.SendAsync(testEmailAddress.Trim(), subject, body);
+            TempData["Success"] = $"Testmail wurde an '{testEmailAddress.Trim()}' versendet.";
+        }
+        catch (Exception ex)
+        {
+            TempData["Error"] = $"Testmail konnte nicht gesendet werden: {ex.Message}";
+        }
+
+        return RedirectToAction(nameof(Settings));
     }
 
     [HttpPost]

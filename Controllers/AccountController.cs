@@ -149,7 +149,7 @@ public class AccountController : Controller
     [Authorize]
     [HttpPost]
     [ValidateAntiForgeryToken]
-    public async Task<IActionResult> Profile(string username, string email)
+    public async Task<IActionResult> Profile(string username, string email, bool notifyOnAssignment, bool notify24hBeforeTask, bool notify1hBeforeTask)
     {
         var userId = int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
         var user = await _db.Users.FindAsync(userId);
@@ -187,6 +187,9 @@ public class AccountController : Controller
 
         user.Username = username;
         user.Email = email;
+        user.NotifyOnAssignment = notifyOnAssignment;
+        user.Notify24hBeforeTask = notify24hBeforeTask;
+        user.Notify1hBeforeTask = notify1hBeforeTask;
         await _db.SaveChangesAsync();
 
         TempData["Success"] = "Profil aktualisiert. Bitte neu einloggen, damit der Anzeigename im Menü aktualisiert wird.";

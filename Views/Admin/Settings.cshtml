@@ -17,6 +17,11 @@
     <div class="alert alert-success">@success</div>
 }
 
+@if (TempData["Error"] is string error)
+{
+    <div class="alert alert-danger">@error</div>
+}
+
 @if (!ViewData.ModelState.IsValid)
 {
     <div class="alert alert-danger">
@@ -79,7 +84,26 @@
                 </div>
             </div>
 
-            <button type="submit" class="btn btn-primary mt-3">Speichern</button>
+            <div class="d-flex gap-2 flex-wrap mt-3">
+                <button type="submit" class="btn btn-primary">Speichern</button>
+            </div>
+        </form>
+
+        <hr class="my-4" />
+
+        <h5 class="mb-3">Testmail senden</h5>
+        <form method="post" action="/Admin/SendTestEmail">
+            @Html.AntiForgeryToken()
+            <div class="row g-3 align-items-end">
+                <div class="col-md-8">
+                    <label class="form-label" for="testEmailAddress">Empfängeradresse</label>
+                    <input class="form-control" id="testEmailAddress" name="testEmailAddress" type="email" placeholder="test@example.com" required />
+                    <div class="form-text">Verwendet die zuletzt gespeicherten Mail-Einstellungen.</div>
+                </div>
+                <div class="col-md-4">
+                    <button type="submit" class="btn btn-outline-primary w-100">Testmail senden</button>
+                </div>
+            </div>
         </form>
     </div>
 </div>

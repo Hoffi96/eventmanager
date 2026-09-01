@@ -55,46 +55,68 @@ public class TaskReminderService : BackgroundService
         var email = scope.ServiceProvider.GetRequiredService<IEmailService>();
 
         var utcNow = DateTime.UtcNow;
-        var from = utcNow.AddMinutes(_options.MinutesBeforeStart - Math.Max(1, _options.PollIntervalMinutes));
-        var to = utcNow.AddMinutes(_options.MinutesBeforeStart + Math.Max(1, _options.PollIntervalMinutes));
+        var pollWindow = Math.Max(1, _options.PollIntervalMinutes);
+        var appSettings = await db.AppSettings.FirstOrDefaultAsync(cancellationToken) ?? new Models.AppSettings();
 
-        var tasks = await db.Tasks
-            .Include(t => t.Event)
-            .Include(t => t.Assignments)
-            .ThenInclude(a => a.User)
-            .Where(t => t.StartsAt >= from && t.StartsAt <= to)
-            .ToListAsync(cancellationToken);
-
-        foreach (var task in tasks)
+        var reminderWindows = new List<(int MinutesBeforeStart, string Marker, Func<Models.User, bool> IsEnabled)>();
+        if (appSettings.RemindersEnabled && appSettings.Reminder24h)
         {
-            foreach (var assignment in task.Assignments.Where(a => !a.AssignedByAdmin || a.User.Email != null))
+            reminderWindows.Add((24 * 60, "24h", user => user.Notify24hBeforeTask));
+        }
+        if (appSettings.RemindersEnabled && appSettings.Reminder1h)
+        {
+            reminderWindows.Add((60, "1h", user => user.Notify1hBeforeTask));
+        }
+        if (!reminderWindows.Any())
+        {
+            reminderWindows.Add((_options.MinutesBeforeStart, $"{_options.MinutesBeforeStart}m", user => user.Notify24hBeforeTask || user.Notify1hBeforeTask));
+        }
+
+        foreach (var reminder in reminderWindows)
+        {
+            var from = utcNow.AddMinutes(reminder.MinutesBeforeStart - pollWindow);
+            var to = utcNow.AddMinutes(reminder.MinutesBeforeStart + pollWindow);
+
+            var tasks = await db.Tasks
+                .Include(t => t.Event)
+                .Include(t => t.Assignments)
+                .ThenInclude(a => a.User)
+                .Where(t => t.StartsAt >= from && t.StartsAt <= to)
+                .ToListAsync(cancellationToken);
+
+            foreach (var task in tasks)
             {
-                if (string.IsNullOrWhiteSpace(assignment.User.Email))
+                foreach (var assignment in task.Assignments.Where(a => a.User != null))
                 {
-                    continue;
+                    var user = assignment.User;
+                    if (string.IsNullOrWhiteSpace(user.Email) || !reminder.IsEnabled(user))
+                    {
+                        continue;
+                    }
+
+                    var marker = $"[system-reminder:{reminder.Marker}:{task.StartsAt:O}]";
+                    var alreadySent = await db.Comments.AnyAsync(c =>
+                        c.TaskId == task.Id &&
+                        c.UserId == assignment.UserId &&
+                        c.Body == marker,
+                        cancellationToken);
+
+                    if (alreadySent)
+                    {
+                        continue;
+                    }
+
+                    var body = $"Hallo {user.Username},\n\nErinnerung: Dein Helfer-Task '{task.Title}' für '{task.Event.Name}' beginnt bald.\n\nBeginn: {task.StartsAt.ToLocalTime():dd.MM.yyyy HH:mm}\nEnde: {task.EndsAt.ToLocalTime():dd.MM.yyyy HH:mm}\n\nBitte prüfe bei Bedarf deine Zuordnung in Helfer-Tasks.";
+                    await email.SendAsync(user.Email, $"Erinnerung: {task.Title}", body);
+
+                    db.Comments.Add(new Models.Comment
+                    {
+                        TaskId = task.Id,
+                        UserId = assignment.UserId,
+                        Body = marker,
+                        CreatedAt = DateTime.UtcNow
+                    });
                 }
-
-                var alreadySent = await db.Comments.AnyAsync(c =>
-                    c.TaskId == task.Id &&
-                    c.UserId == assignment.UserId &&
-                    c.Body == $"[system-reminder:{task.StartsAt:O}]",
-                    cancellationToken);
-
-                if (alreadySent)
-                {
-                    continue;
-                }
-
-                var body = $"Hallo {assignment.User.Username},\n\nErinnerung: Dein Helfer-Task '{task.Title}' für '{task.Event.Name}' beginnt bald.\n\nBeginn: {task.StartsAt.ToLocalTime():dd.MM.yyyy HH:mm}\nEnde: {task.EndsAt.ToLocalTime():dd.MM.yyyy HH:mm}\n\nBitte prüfe bei Bedarf deine Zuordnung in Helfer-Tasks.";
-                await email.SendAsync(assignment.User.Email, $"Erinnerung: {task.Title}", body);
-
-                db.Comments.Add(new Models.Comment
-                {
-                    TaskId = task.Id,
-                    UserId = assignment.UserId,
-                    Body = $"[system-reminder:{task.StartsAt:O}]",
-                    CreatedAt = DateTime.UtcNow
-                });
             }
         }
 
