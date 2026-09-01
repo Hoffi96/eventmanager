@@ -1,23 +1,16 @@
 using HelferApp.Data;
 using HelferApp.Models;
-using HelferApp.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Options;
 
 namespace HelferApp.Controllers;
 
 [Authorize(Roles = "Admin")]
 public class AdminController : AuthorizedControllerBase
 {
-    private readonly IOptionsMonitor<EmailOptions> _emailOptions;
-
-    public AdminController(
-        AppDbContext db,
-        IOptionsMonitor<EmailOptions> emailOptions) : base(db)
+    public AdminController(AppDbContext db) : base(db)
     {
-        _emailOptions = emailOptions;
     }
 
     public async Task<IActionResult> Users()
@@ -75,7 +68,7 @@ public class AdminController : AuthorizedControllerBase
 
         Db.EventCoordinatorAssignments.Remove(assignment);
 
-        var hasMore = await Db.EventCoordinatorAssignments.AnyAsync(x => x.UserId == userId && !(x.UserId == userId && x.EventId == eventId));
+        var hasMore = await Db.EventCoordinatorAssignments.AnyAsync(x => x.UserId == userId && x.EventId != eventId);
         var user = await Db.Users.FindAsync(userId);
         if (user != null && !hasMore)
         {
@@ -87,13 +80,23 @@ public class AdminController : AuthorizedControllerBase
         return RedirectToAction(nameof(Users));
     }
 
-    public IActionResult Settings() => View(_emailOptions.CurrentValue);
+    public async Task<IActionResult> Settings()
+    {
+        var settings = await Db.AppSettings.FirstOrDefaultAsync();
+        if (settings == null)
+        {
+            settings = new AppSettings();
+            Db.AppSettings.Add(settings);
+            await Db.SaveChangesAsync();
+        }
+        return View(settings);
+    }
 
     [HttpPost]
     [ValidateAntiForgeryToken]
-    public IActionResult Settings(EmailOptions model)
+    public async Task<IActionResult> Settings(AppSettings model)
     {
-        if (model.Enabled)
+        if (model.EmailEnabled)
         {
             if (string.IsNullOrWhiteSpace(model.SmtpHost))
             {
@@ -111,7 +114,28 @@ public class AdminController : AuthorizedControllerBase
             return View(model);
         }
 
-        TempData["Info"] = "E-Mail-Einstellungen werden derzeit über appsettings.*.json verwaltet. Bitte die Konfigurationsdatei anpassen und die App neu starten.";
+        var existing = await Db.AppSettings.FirstOrDefaultAsync();
+        if (existing == null)
+        {
+            Db.AppSettings.Add(model);
+        }
+        else
+        {
+            existing.EmailEnabled = model.EmailEnabled;
+            existing.SmtpHost = model.SmtpHost;
+            existing.SmtpPort = model.SmtpPort;
+            existing.SmtpUser = model.SmtpUser;
+            existing.SmtpPassword = model.SmtpPassword;
+            existing.EnableSsl = model.EnableSsl;
+            existing.FromAddress = model.FromAddress;
+            existing.FromName = model.FromName;
+            existing.RemindersEnabled = model.RemindersEnabled;
+            existing.Reminder24h = model.Reminder24h;
+            existing.Reminder1h = model.Reminder1h;
+        }
+
+        await Db.SaveChangesAsync();
+        TempData["Success"] = "E-Mail-Einstellungen gespeichert.";
         return View(model);
     }
 

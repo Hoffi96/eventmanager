@@ -1,23 +1,23 @@
 using System.Net;
 using System.Net.Mail;
+using HelferApp.Data;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace HelferApp.Services;
 
 /// <summary>
-/// Versendet E-Mails per SMTP, sofern in appsettings.json unter "Email"
-/// konfiguriert (Enabled = true + SmtpHost gesetzt). Andernfalls wird die
-/// Mail nur geloggt, damit die App auch ohne Mail-Setup lauffähig bleibt.
+/// Versendet E-Mails per SMTP, sofern in den AppSettings Enabled = true
+/// und SmtpHost gesetzt ist. Andernfalls wird die Mail nur geloggt.
 /// </summary>
 public class SmtpEmailService : IEmailService
 {
-    private readonly EmailOptions _options;
+    private readonly IDbContextFactory<AppDbContext> _dbFactory;
     private readonly ILogger<SmtpEmailService> _logger;
 
-    public SmtpEmailService(IOptions<EmailOptions> options, ILogger<SmtpEmailService> logger)
+    public SmtpEmailService(IDbContextFactory<AppDbContext> dbFactory, ILogger<SmtpEmailService> logger)
     {
-        _options = options.Value;
+        _dbFactory = dbFactory;
         _logger = logger;
     }
 
@@ -28,7 +28,10 @@ public class SmtpEmailService : IEmailService
             return;
         }
 
-        if (!_options.Enabled || string.IsNullOrWhiteSpace(_options.SmtpHost))
+        await using var db = await _dbFactory.CreateDbContextAsync();
+        var settings = await db.AppSettings.FirstOrDefaultAsync();
+
+        if (settings == null || !settings.EmailEnabled || string.IsNullOrWhiteSpace(settings.SmtpHost))
         {
             _logger.LogInformation(
                 "E-Mail nicht versendet (SMTP deaktiviert/nicht konfiguriert) an {To}: {Subject}\n{Body}",
@@ -38,19 +41,19 @@ public class SmtpEmailService : IEmailService
 
         using var message = new MailMessage
         {
-            From = new MailAddress(_options.FromAddress, _options.FromName),
+            From = new MailAddress(settings.FromAddress, settings.FromName ?? "Helfer-Tasks"),
             Subject = subject,
             Body = body,
             IsBodyHtml = false
         };
         message.To.Add(toAddress);
 
-        using var client = new SmtpClient(_options.SmtpHost, _options.SmtpPort)
+        using var client = new SmtpClient(settings.SmtpHost, settings.SmtpPort)
         {
-            EnableSsl = _options.EnableSsl,
-            Credentials = string.IsNullOrWhiteSpace(_options.SmtpUser)
+            EnableSsl = settings.EnableSsl,
+            Credentials = string.IsNullOrWhiteSpace(settings.SmtpUser)
                 ? CredentialCache.DefaultNetworkCredentials
-                : new NetworkCredential(_options.SmtpUser, _options.SmtpPassword)
+                : new NetworkCredential(settings.SmtpUser, settings.SmtpPassword)
         };
 
         try

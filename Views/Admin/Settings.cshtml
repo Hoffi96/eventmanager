@@ -1,4 +1,4 @@
-@model HelferApp.Services.EmailOptions
+@model HelferApp.Models.AppSettings
 
 @{
     ViewData["Title"] = "Einstellungen";
@@ -32,8 +32,8 @@
             @Html.AntiForgeryToken()
 
             <div class="form-check form-switch mb-4">
-                <input asp-for="Enabled" class="form-check-input" />
-                <label asp-for="Enabled" class="form-check-label"></label>
+                <input asp-for="EmailEnabled" class="form-check-input" />
+                <label asp-for="EmailEnabled" class="form-check-label"></label>
                 <div class="form-text">Wenn deaktiviert, werden E-Mails nur ins Log geschrieben.</div>
             </div>
 
@@ -79,11 +79,7 @@
                 </div>
             </div>
 
-            <div class="mt-4 d-flex gap-2">
-                <button type="submit" class="btn btn-primary">Speichern</button>
-                <a href="/Tasks" class="btn btn-outline-secondary">Abbrechen</a>
-            </div>
+            <button type="submit" class="btn btn-primary mt-3">Speichern</button>
         </form>
     </div>
 </div>
-

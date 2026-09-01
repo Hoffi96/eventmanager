@@ -98,7 +98,7 @@ public class TasksController : AuthorizedControllerBase
     {
         ModelState.Remove(nameof(TaskItem.Event));
 
-        var error = ValidateTask(form);
+        var error = await ValidateTaskAsync(form);
         if (error is not null)
             ModelState.AddModelError(string.Empty, error);
 
@@ -155,7 +155,7 @@ public class TasksController : AuthorizedControllerBase
         if (!IsAdmin && !await CanManageEventAsync(existing.EventId))
             return Forbid();
 
-        var error = ValidateTask(form);
+        var error = await ValidateTaskAsync(form);
         if (error is not null)
             ModelState.AddModelError(string.Empty, error);
 
@@ -279,12 +279,17 @@ public class TasksController : AuthorizedControllerBase
 
     private async Task LoadEventsAsync() => ViewBag.Events = await Db.Events.OrderBy(e => e.StartsAt).ToListAsync();
 
-    private static string? ValidateTask(TaskItem task)
+    private async Task<string?> ValidateTaskAsync(TaskItem task)
     {
-        if (task.EventId <= 0) return "Bitte eine Veranstaltung auswählen.";
+        if (task.EventId <= 0) return "Bitte eine Veranstaltung auswählen.";
         if (string.IsNullOrWhiteSpace(task.Title)) return "Bitte einen Titel angeben.";
         if (task.EndsAt <= task.StartsAt) return "Ende muss nach dem Start liegen.";
         if (task.MaxAssignees < 1) return "Mindestens 1 Person erforderlich.";
+
+        var ev = await Db.Events.FindAsync(task.EventId);
+        if (ev == null) return "Veranstaltung nicht gefunden.";
+        if (task.StartsAt < ev.StartsAt || task.EndsAt > ev.EndsAt) return "Der Task-Zeitraum muss vollständig innerhalb der gew\u00e4hlten Veranstaltung liegen.";
+
         return null;
     }
 

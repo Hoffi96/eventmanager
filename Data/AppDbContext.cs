@@ -18,6 +18,7 @@ public class AppDbContext : DbContext
     public DbSet<WaitlistEntry> WaitlistEntries => Set<WaitlistEntry>();
     public DbSet<EventAttachment> EventAttachments => Set<EventAttachment>();
     public DbSet<EventCoordinatorAssignment> EventCoordinatorAssignments => Set<EventCoordinatorAssignment>();
+    public DbSet<AppSettings> AppSettings => Set<AppSettings>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

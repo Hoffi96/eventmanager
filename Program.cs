@@ -9,12 +9,11 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllersWithViews();
 
-builder.Services.AddDbContext<AppDbContext>(options =>
+builder.Services.AddDbContextFactory<AppDbContext>(options =>
     options.UseSqlite("Data Source=helferapp.db"));
 
-builder.Services.Configure<EmailOptions>(builder.Configuration.GetSection("Email"));
 builder.Services.Configure<ReminderOptions>(builder.Configuration.GetSection("Reminders"));
-builder.Services.AddSingleton<IEmailService, SmtpEmailService>();
+builder.Services.AddScoped<IEmailService, SmtpEmailService>();
 builder.Services.AddHostedService<TaskReminderService>();
 
 builder.Services
@@ -56,6 +55,26 @@ using (var scope = app.Services.CreateScope())
         Console.WriteLine("  E-Mail:       admin@example.com (bitte per Passwort-Reset anpassen)");
         Console.WriteLine("  -> Bitte nach dem ersten Login das Passwort ändern!");
         Console.WriteLine(new string('=', 60));
+    }
+
+    // AppSettings initialisieren, falls noch nicht vorhanden
+    if (!db.AppSettings.Any())
+    {
+        db.AppSettings.Add(new AppSettings
+        {
+            EmailEnabled = false,
+            SmtpHost = "",
+            SmtpPort = 587,
+            SmtpUser = "",
+            SmtpPassword = "",
+            EnableSsl = true,
+            FromAddress = "no-reply@example.com",
+            FromName = "Helfer-Tasks",
+            RemindersEnabled = false,
+            Reminder24h = false,
+            Reminder1h = false
+        });
+        db.SaveChanges();
     }
 }
 
