@@ -1,0 +1,2901 @@
+===== Controllers/AccountController.cs =====
+0001: using System.Security.Claims;
+0002: using System.Security.Cryptography;
+0003: using HelferApp.Data;
+0004: using HelferApp.Models;
+0005: using HelferApp.Services;
+0006: using Microsoft.AspNetCore.Authentication;
+0007: using Microsoft.AspNetCore.Authentication.Cookies;
+0008: using Microsoft.AspNetCore.Authorization;
+0009: using Microsoft.AspNetCore.Mvc;
+0010: using Microsoft.EntityFrameworkCore;
+0011: 
+0012: namespace HelferApp.Controllers;
+0013: 
+0014: public class AccountController : Controller
+0015: {
+0016:     private readonly AppDbContext _db;
+0017:     private readonly IEmailService _emailService;
+0018: 
+0019:     public AccountController(AppDbContext db, IEmailService emailService)
+0020:     {
+0021:         _db = db;
+0022:         _emailService = emailService;
+0023:     }
+0024: 
+0025:     // ---------- Registrierung ----------
+0026: 
+0027:     [HttpGet]
+0028:     public IActionResult Register() => View();
+0029: 
+0030:     [HttpPost]
+0031:     [ValidateAntiForgeryToken]
+0032:     public async Task<IActionResult> Register(string username, string email, string password, string password2)
+0033:     {
+0034:         username = (username ?? "").Trim();
+0035:         email = (email ?? "").Trim();
+0036: 
+0037:         if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+0038:         {
+0039:             TempData["Error"] = "Benutzername und Passwort sind erforderlich.";
+0040:         }
+0041:         else if (string.IsNullOrWhiteSpace(email) || !email.Contains('@'))
+0042:         {
+0043:             TempData["Error"] = "Bitte eine gültige E-Mail-Adresse angeben.";
+0044:         }
+0045:         else if (password != password2)
+0046:         {
+0047:             TempData["Error"] = "Passwörter stimmen nicht überein.";
+0048:         }
+0049:         else if (password.Length < 4)
+0050:         {
+0051:             TempData["Error"] = "Passwort ist zu kurz (mind. 4 Zeichen).";
+0052:         }
+0053:         else if (await _db.Users.AnyAsync(u => u.Username == username))
+0054:         {
+0055:             TempData["Error"] = "Benutzername bereits vergeben.";
+0056:         }
+0057:         else if (await _db.Users.AnyAsync(u => u.Email == email))
+0058:         {
+0059:             TempData["Error"] = "Für diese E-Mail-Adresse existiert bereits ein Konto.";
+0060:         }
+0061:         else
+0062:         {
+0063:             _db.Users.Add(new User
+0064:             {
+0065:                 Username = username,
+0066:                 Email = email,
+0067:                 PasswordHash = PasswordHelper.Hash(password),
+0068:                 IsAdmin = false,
+0069:                 CreatedAt = DateTime.UtcNow
+0070:             });
+0071:             await _db.SaveChangesAsync();
+0072: 
+0073:             TempData["Success"] = "Konto erstellt. Du kannst dich jetzt einloggen.";
+0074:             return RedirectToAction(nameof(Login));
+0075:         }
+0076: 
+0077:         return View();
+0078:     }
+0079: 
+0080:     // ---------- Login/Logout ----------
+0081: 
+0082:     [HttpGet]
+0083:     public IActionResult Login(string? returnUrl = null)
+0084:     {
+0085:         ViewData["ReturnUrl"] = returnUrl;
+0086:         return View();
+0087:     }
+0088: 
+0089:     [HttpPost]
+0090:     [ValidateAntiForgeryToken]
+0091:     public async Task<IActionResult> Login(string username, string password, string? returnUrl = null)
+0092:     {
+0093:         var user = await _db.Users.FirstOrDefaultAsync(u => u.Username == username);
+0094: 
+0095:         if (user != null && PasswordHelper.Verify(password, user.PasswordHash))
+0096:         {
+0097:             var claims = new List<Claim>
+0098:             {
+0099:                 new(ClaimTypes.NameIdentifier, user.Id.ToString()),
+0100:                 new(ClaimTypes.Name, user.Username),
+0101:             };
+0102:             if (user.IsAdmin)
+0103:             {
+0104:                 claims.Add(new Claim(ClaimTypes.Role, "Admin"));
+0105:             }
+0106: 
+0107:             var identity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
+0108:             await HttpContext.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(identity));
+0109: 
+0110:             TempData["Success"] = $"Willkommen, {user.Username}!";
+0111: 
+0112:             if (!string.IsNullOrEmpty(returnUrl) && Url.IsLocalUrl(returnUrl))
+0113:             {
+0114:                 return Redirect(returnUrl);
+0115:             }
+0116:             return RedirectToAction("Index", "Tasks");
+0117:         }
+0118: 
+0119:         TempData["Error"] = "Login fehlgeschlagen.";
+0120:         ViewData["ReturnUrl"] = returnUrl;
+0121:         return View();
+0122:     }
+0123: 
+0124:     [HttpPost]
+0125:     [ValidateAntiForgeryToken]
+0126:     public async Task<IActionResult> Logout()
+0127:     {
+0128:         await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+0129:         TempData["Info"] = "Abgemeldet.";
+0130:         return RedirectToAction(nameof(Login));
+0131:     }
+0132: 
+0133:     // ---------- Passwort ändern (eingeloggt) ----------
+0134: 
+0135:     [Authorize]
+0136:     [HttpGet]
+0137:     public IActionResult ChangePassword() => View();
+0138: 
+0139:     [Authorize]
+0140:     [HttpPost]
+0141:     [ValidateAntiForgeryToken]
+0142:     public async Task<IActionResult> ChangePassword(string currentPassword, string newPassword, string newPassword2)
+0143:     {
+0144:         var uid = int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
+0145:         var user = await _db.Users.FindAsync(uid);
+0146:         if (user == null)
+0147:         {
+0148:             return NotFound();
+0149:         }
+0150: 
+0151:         if (!PasswordHelper.Verify(currentPassword ?? "", user.PasswordHash))
+0152:         {
+0153:             TempData["Error"] = "Aktuelles Passwort ist falsch.";
+0154:         }
+0155:         else if (string.IsNullOrWhiteSpace(newPassword) || newPassword.Length < 4)
+0156:         {
+0157:             TempData["Error"] = "Neues Passwort ist zu kurz (mind. 4 Zeichen).";
+0158:         }
+0159:         else if (newPassword != newPassword2)
+0160:         {
+0161:             TempData["Error"] = "Neue Passwörter stimmen nicht überein.";
+0162:         }
+0163:         else
+0164:         {
+0165:             user.PasswordHash = PasswordHelper.Hash(newPassword);
+0166:             await _db.SaveChangesAsync();
+0167:             TempData["Success"] = "Passwort geändert.";
+0168:             return RedirectToAction("Index", "Tasks");
+0169:         }
+0170: 
+0171:         return View();
+0172:     }
+0173: 
+0174:     // ---------- Passwort vergessen / zurücksetzen ----------
+0175: 
+0176:     [HttpGet]
+0177:     public IActionResult ForgotPassword() => View();
+0178: 
+0179:     [HttpPost]
+0180:     [ValidateAntiForgeryToken]
+0181:     public async Task<IActionResult> ForgotPassword(string email)
+0182:     {
+0183:         var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == email);
+0184:         if (user != null)
+0185:         {
+0186:             var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+0187:             user.PasswordResetToken = token;
+0188:             user.PasswordResetTokenExpiresAt = DateTime.UtcNow.AddHours(1);
+0189:             await _db.SaveChangesAsync();
+0190: 
+0191:             var resetUrl = Url.Action("ResetPassword", "Account", new { token }, Request.Scheme);
+0192:             var body = "Hallo " + user.Username + ",\n\n" +
+0193:                        "über folgenden Link kannst du dein Passwort zurücksetzen (1 Stunde gültig):\n" +
+0194:                        resetUrl + "\n\n" +
+0195:                        "Wenn du das nicht angefordert hast, ignoriere diese E-Mail.";
+0196: 
+0197:             await _emailService.SendAsync(user.Email, "Passwort zurücksetzen - Helfer-Tasks", body);
+0198:         }
+0199: 
+0200:         // Immer dieselbe Meldung, egal ob die E-Mail existiert (kein Enumeration-Leak).
+0201:         TempData["Success"] = "Falls diese E-Mail-Adresse registriert ist, wurde ein Link zum Zurücksetzen verschickt.";
+0202:         return RedirectToAction(nameof(Login));
+0203:     }
+0204: 
+0205:     [HttpGet]
+0206:     public async Task<IActionResult> ResetPassword(string token)
+0207:     {
+0208:         var user = await _db.Users.FirstOrDefaultAsync(u => u.PasswordResetToken == token);
+0209:         if (user == null || user.PasswordResetTokenExpiresAt == null || user.PasswordResetTokenExpiresAt < DateTime.UtcNow)
+0210:         {
+0211:             TempData["Error"] = "Der Link ist ungültig oder abgelaufen.";
+0212:             return RedirectToAction(nameof(ForgotPassword));
+0213:         }
+0214: 
+0215:         ViewBag.Token = token;
+0216:         return View();
+0217:     }
+0218: 
+0219:     [HttpPost]
+0220:     [ValidateAntiForgeryToken]
+0221:     public async Task<IActionResult> ResetPassword(string token, string newPassword, string newPassword2)
+0222:     {
+0223:         var user = await _db.Users.FirstOrDefaultAsync(u => u.PasswordResetToken == token);
+0224:         if (user == null || user.PasswordResetTokenExpiresAt == null || user.PasswordResetTokenExpiresAt < DateTime.UtcNow)
+0225:         {
+0226:             TempData["Error"] = "Der Link ist ungültig oder abgelaufen.";
+0227:             return RedirectToAction(nameof(ForgotPassword));
+0228:         }
+0229: 
+0230:         if (string.IsNullOrWhiteSpace(newPassword) || newPassword.Length < 4)
+0231:         {
+0232:             TempData["Error"] = "Passwort ist zu kurz (mind. 4 Zeichen).";
+0233:             ViewBag.Token = token;
+0234:             return View();
+0235:         }
+0236:         if (newPassword != newPassword2)
+0237:         {
+0238:             TempData["Error"] = "Passwörter stimmen nicht überein.";
+0239:             ViewBag.Token = token;
+0240:             return View();
+0241:         }
+0242: 
+0243:         user.PasswordHash = PasswordHelper.Hash(newPassword);
+0244:         user.PasswordResetToken = null;
+0245:         user.PasswordResetTokenExpiresAt = null;
+0246:         await _db.SaveChangesAsync();
+0247: 
+0248:         TempData["Success"] = "Passwort zurückgesetzt. Du kannst dich jetzt einloggen.";
+0249:         return RedirectToAction(nameof(Login));
+0250:     }
+0251: }
+===== Controllers/AdminController.cs =====
+0001: using System.Text.Json;
+0002: using HelferApp.Data;
+0003: using HelferApp.Services;
+0004: using Microsoft.AspNetCore.Authorization;
+0005: using Microsoft.AspNetCore.Mvc;
+0006: using Microsoft.EntityFrameworkCore;
+0007: using Microsoft.Extensions.Options;
+0008: 
+0009: namespace HelferApp.Controllers;
+0010: 
+0011: [Authorize(Roles = "Admin")]
+0012: public class AdminController : AuthorizedControllerBase
+0013: {
+0014:     private readonly IWebHostEnvironment _environment;
+0015:     private readonly IOptionsMonitor<EmailOptions> _emailOptionsMonitor;
+0016: 
+0017:     public AdminController(
+0018:         AppDbContext db,
+0019:         IWebHostEnvironment environment,
+0020:         IOptionsMonitor<EmailOptions> emailOptionsMonitor) : base(db)
+0021:     {
+0022:         _environment = environment;
+0023:         _emailOptionsMonitor = emailOptionsMonitor;
+0024:     }
+0025: 
+0026:     public async Task<IActionResult> Users()
+0027:     {
+0028:         var users = await Db.Users.OrderBy(u => u.Username).ToListAsync();
+0029:         return View(users);
+0030:     }
+0031: 
+0032:     public IActionResult Settings()
+0033:     {
+0034:         return View(_emailOptionsMonitor.CurrentValue);
+0035:     }
+0036: 
+0037:     [HttpPost]
+0038:     [ValidateAntiForgeryToken]
+0039:     public async Task<IActionResult> Settings(EmailOptions model)
+0040:     {
+0041:         if (model.Enabled)
+0042:         {
+0043:             if (string.IsNullOrWhiteSpace(model.SmtpHost))
+0044:             {
+0045:                 ModelState.AddModelError(nameof(model.SmtpHost), "Bitte einen SMTP-Host angeben, wenn der Mailversand aktiviert ist.");
+0046:             }
+0047: 
+0048:             if (string.IsNullOrWhiteSpace(model.FromAddress))
+0049:             {
+0050:                 ModelState.AddModelError(nameof(model.FromAddress), "Bitte eine Absenderadresse angeben, wenn der Mailversand aktiviert ist.");
+0051:             }
+0052:         }
+0053: 
+0054:         if (!ModelState.IsValid)
+0055:         {
+0056:             return View(model);
+0057:         }
+0058: 
+0059:         var appSettingsPath = Path.Combine(_environment.ContentRootPath, "appsettings.json");
+0060: 
+0061:         Dictionary<string, JsonElement>? root;
+0062:         await using (var readStream = System.IO.File.OpenRead(appSettingsPath))
+0063:         {
+0064:             root = await JsonSerializer.DeserializeAsync<Dictionary<string, JsonElement>>(readStream);
+0065:         }
+0066: 
+0067:         root ??= new Dictionary<string, JsonElement>();
+0068:         root["Email"] = JsonSerializer.SerializeToElement(model, new JsonSerializerOptions
+0069:         {
+0070:             WriteIndented = true
+0071:         });
+0072: 
+0073:         var json = JsonSerializer.Serialize(root, new JsonSerializerOptions
+0074:         {
+0075:             WriteIndented = true
+0076:         });
+0077: 
+0078:         await System.IO.File.WriteAllTextAsync(appSettingsPath, json + Environment.NewLine);
+0079: 
+0080:         TempData["Success"] = "E-Mail-Einstellungen wurden gespeichert. Neue Werte gelten für neue Requests sofort.";
+0081:         return RedirectToAction(nameof(Settings));
+0082:     }
+0083: 
+0084:     [HttpPost]
+0085:     [ValidateAntiForgeryToken]
+0086:     public async Task<IActionResult> ToggleAdmin(int userId)
+0087:     {
+0088:         if (userId == CurrentUserId)
+0089:         {
+0090:             TempData["Error"] = "Du kannst dir selbst die Admin-Rechte nicht entziehen.";
+0091:             return RedirectToAction(nameof(Users));
+0092:         }
+0093: 
+0094:         var user = await Db.Users.FindAsync(userId);
+0095:         if (user == null)
+0096:         {
+0097:             return NotFound();
+0098:         }
+0099: 
+0100:         user.IsAdmin = !user.IsAdmin;
+0101:         await Db.SaveChangesAsync();
+0102: 
+0103:         return RedirectToAction(nameof(Users));
+0104:     }
+0105: }
+===== Controllers/AuthorizedControllerBase.cs =====
+0001: using System.Security.Claims;
+0002: using HelferApp.Data;
+0003: using Microsoft.AspNetCore.Authorization;
+0004: using Microsoft.AspNetCore.Mvc;
+0005: 
+0006: namespace HelferApp.Controllers;
+0007: 
+0008: [Authorize]
+0009: public abstract class AuthorizedControllerBase : Controller
+0010: {
+0011:     protected readonly AppDbContext Db;
+0012: 
+0013:     protected AuthorizedControllerBase(AppDbContext db)
+0014:     {
+0015:         Db = db;
+0016:     }
+0017: 
+0018:     protected int CurrentUserId =>
+0019:         int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
+0020: 
+0021:     protected bool IsAdmin => User.IsInRole("Admin");
+0022: }
+===== Controllers/EventsController.cs =====
+0001: using HelferApp.Data;
+0002: using HelferApp.Models;
+0003: using HelferApp.Services;
+0004: using Microsoft.AspNetCore.Authorization;
+0005: using Microsoft.AspNetCore.Mvc;
+0006: using Microsoft.EntityFrameworkCore;
+0007: 
+0008: namespace HelferApp.Controllers;
+0009: 
+0010: [Authorize]
+0011: public class EventsController : AuthorizedControllerBase
+0012: {
+0013:     private readonly IWebHostEnvironment _env;
+0014: 
+0015:     private static readonly HashSet<string> AllowedExtensions = new(StringComparer.OrdinalIgnoreCase)
+0016:     {
+0017:         ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".txt",
+0018:         ".doc", ".docx", ".xls", ".xlsx", ".csv", ".zip"
+0019:     };
+0020: 
+0021:     private const long MaxFileSize = 10 * 1024 * 1024; // 10 MB
+0022: 
+0023:     public EventsController(AppDbContext db, IWebHostEnvironment env) : base(db)
+0024:     {
+0025:         _env = env;
+0026:     }
+0027: 
+0028:     private string UploadDir
+0029:     {
+0030:         get
+0031:         {
+0032:             var dir = Path.Combine(_env.ContentRootPath, "Uploads", "events");
+0033:             Directory.CreateDirectory(dir);
+0034:             return dir;
+0035:         }
+0036:     }
+0037: 
+0038:     public async Task<IActionResult> Index()
+0039:     {
+0040:         var events = await Db.Events
+0041:             .Include(e => e.Tasks)
+0042:             .OrderBy(e => e.StartsAt)
+0043:             .ToListAsync();
+0044:         return View(events);
+0045:     }
+0046: 
+0047:     public async Task<IActionResult> Details(int id)
+0048:     {
+0049:         var ev = await Db.Events
+0050:             .Include(e => e.Tasks).ThenInclude(t => t.Assignments)
+0051:             .Include(e => e.Attachments).ThenInclude(a => a.UploadedBy)
+0052:             .FirstOrDefaultAsync(e => e.Id == id);
+0053: 
+0054:         if (ev == null)
+0055:         {
+0056:             return NotFound();
+0057:         }
+0058: 
+0059:         return View(ev);
+0060:     }
+0061: 
+0062:     [Authorize(Roles = "Admin")]
+0063:     [HttpGet]
+0064:     public IActionResult New() => View("EventForm", new Event());
+0065: 
+0066:     [Authorize(Roles = "Admin")]
+0067:     [HttpPost]
+0068:     [ValidateAntiForgeryToken]
+0069:     public async Task<IActionResult> New(Event form)
+0070:     {
+0071:         var error = ValidateEvent(form);
+0072:         if (error != null)
+0073:         {
+0074:             TempData["Error"] = error;
+0075:             return View("EventForm", form);
+0076:         }
+0077: 
+0078:         var ev = new Event
+0079:         {
+0080:             Name = form.Name.Trim(),
+0081:             Location = string.IsNullOrWhiteSpace(form.Location) ? null : form.Location.Trim(),
+0082:             Description = HtmlSanitizer.Sanitize(form.Description),
+0083:             StartsAt = form.StartsAt,
+0084:             EndsAt = form.EndsAt,
+0085:             CreatedById = CurrentUserId,
+0086:             CreatedAt = DateTime.UtcNow
+0087:         };
+0088: 
+0089:         Db.Events.Add(ev);
+0090:         await Db.SaveChangesAsync();
+0091: 
+0092:         TempData["Success"] = "Veranstaltung angelegt.";
+0093:         return RedirectToAction(nameof(Details), new { id = ev.Id });
+0094:     }
+0095: 
+0096:     [Authorize(Roles = "Admin")]
+0097:     [HttpGet]
+0098:     public async Task<IActionResult> Edit(int id)
+0099:     {
+0100:         var ev = await Db.Events.FindAsync(id);
+0101:         if (ev == null)
+0102:         {
+0103:             return NotFound();
+0104:         }
+0105:         return View("EventForm", ev);
+0106:     }
+0107: 
+0108:     [Authorize(Roles = "Admin")]
+0109:     [HttpPost]
+0110:     [ValidateAntiForgeryToken]
+0111:     public async Task<IActionResult> Edit(int id, Event form)
+0112:     {
+0113:         var ev = await Db.Events.FindAsync(id);
+0114:         if (ev == null)
+0115:         {
+0116:             return NotFound();
+0117:         }
+0118: 
+0119:         var error = ValidateEvent(form);
+0120:         if (error != null)
+0121:         {
+0122:             TempData["Error"] = error;
+0123:             form.Id = id;
+0124:             return View("EventForm", form);
+0125:         }
+0126: 
+0127:         ev.Name = form.Name.Trim();
+0128:         ev.Location = string.IsNullOrWhiteSpace(form.Location) ? null : form.Location.Trim();
+0129:         ev.Description = HtmlSanitizer.Sanitize(form.Description);
+0130:         ev.StartsAt = form.StartsAt;
+0131:         ev.EndsAt = form.EndsAt;
+0132: 
+0133:         await Db.SaveChangesAsync();
+0134: 
+0135:         TempData["Success"] = "Veranstaltung aktualisiert.";
+0136:         return RedirectToAction(nameof(Details), new { id });
+0137:     }
+0138: 
+0139:     [Authorize(Roles = "Admin")]
+0140:     [HttpPost]
+0141:     [ValidateAntiForgeryToken]
+0142:     public async Task<IActionResult> Delete(int id)
+0143:     {
+0144:         var ev = await Db.Events.Include(e => e.Tasks).FirstOrDefaultAsync(e => e.Id == id);
+0145:         if (ev == null)
+0146:         {
+0147:             return NotFound();
+0148:         }
+0149: 
+0150:         if (ev.Tasks.Any())
+0151:         {
+0152:             TempData["Error"] = "Veranstaltung hat noch zugeordnete Tasks und kann nicht gelöscht werden. Bitte zuerst die Tasks löschen oder verschieben.";
+0153:             return RedirectToAction(nameof(Details), new { id });
+0154:         }
+0155: 
+0156:         Db.Events.Remove(ev);
+0157:         await Db.SaveChangesAsync();
+0158: 
+0159:         TempData["Info"] = "Veranstaltung gelöscht.";
+0160:         return RedirectToAction(nameof(Index));
+0161:     }
+0162: 
+0163:     // ---------- Anhänge ----------
+0164: 
+0165:     [HttpPost]
+0166:     [ValidateAntiForgeryToken]
+0167:     [RequestSizeLimit(MaxFileSize)]
+0168:     public async Task<IActionResult> Attachment(int id, IFormFile? file)
+0169:     {
+0170:         var exists = await Db.Events.AnyAsync(e => e.Id == id);
+0171:         if (!exists)
+0172:         {
+0173:             return NotFound();
+0174:         }
+0175: 
+0176:         if (file == null || file.Length == 0)
+0177:         {
+0178:             TempData["Error"] = "Keine Datei ausgewählt.";
+0179:             return RedirectToAction(nameof(Details), new { id });
+0180:         }
+0181: 
+0182:         var ext = Path.GetExtension(file.FileName);
+0183:         if (!AllowedExtensions.Contains(ext))
+0184:         {
+0185:             TempData["Error"] = "Dateityp nicht erlaubt.";
+0186:             return RedirectToAction(nameof(Details), new { id });
+0187:         }
+0188: 
+0189:         var storedName = $"{id}_{DateTime.UtcNow:yyyyMMddHHmmssfff}_{Path.GetFileName(file.FileName)}";
+0190:         var fullPath = Path.Combine(UploadDir, storedName);
+0191: 
+0192:         await using (var stream = System.IO.File.Create(fullPath))
+0193:         {
+0194:             await file.CopyToAsync(stream);
+0195:         }
+0196: 
+0197:         Db.EventAttachments.Add(new EventAttachment
+0198:         {
+0199:             EventId = id,
+0200:             FileName = storedName,
+0201:             OriginalName = file.FileName,
+0202:             UploadedById = CurrentUserId,
+0203:             CreatedAt = DateTime.UtcNow
+0204:         });
+0205:         await Db.SaveChangesAsync();
+0206: 
+0207:         TempData["Success"] = "Anhang hochgeladen.";
+0208:         return RedirectToAction(nameof(Details), new { id });
+0209:     }
+0210: 
+0211:     public async Task<IActionResult> Download(int attachmentId)
+0212:     {
+0213:         var attachment = await Db.EventAttachments.FindAsync(attachmentId);
+0214:         if (attachment == null)
+0215:         {
+0216:             return NotFound();
+0217:         }
+0218: 
+0219:         var fullPath = Path.Combine(UploadDir, attachment.FileName);
+0220:         if (!System.IO.File.Exists(fullPath))
+0221:         {
+0222:             return NotFound();
+0223:         }
+0224: 
+0225:         var bytes = await System.IO.File.ReadAllBytesAsync(fullPath);
+0226:         return File(bytes, "application/octet-stream", attachment.OriginalName);
+0227:     }
+0228: 
+0229:     // ---------- Tasks von anderer Veranstaltung übernehmen ----------
+0230: 
+0231:     [Authorize(Roles = "Admin")]
+0232:     [HttpGet]
+0233:     public async Task<IActionResult> CopyTasks(int id)
+0234:     {
+0235:         var target = await Db.Events.FindAsync(id);
+0236:         if (target == null)
+0237:         {
+0238:             return NotFound();
+0239:         }
+0240: 
+0241:         var sources = await Db.Events
+0242:             .Include(e => e.Tasks)
+0243:             .Where(e => e.Id != id && e.Tasks.Any())
+0244:             .OrderByDescending(e => e.StartsAt)
+0245:             .ToListAsync();
+0246: 
+0247:         ViewBag.Target = target;
+0248:         return View(sources);
+0249:     }
+0250: 
+0251:     [Authorize(Roles = "Admin")]
+0252:     [HttpPost]
+0253:     [ValidateAntiForgeryToken]
+0254:     public async Task<IActionResult> CopyTasks(int id, int sourceEventId)
+0255:     {
+0256:         var target = await Db.Events.FindAsync(id);
+0257:         var source = await Db.Events.Include(e => e.Tasks).FirstOrDefaultAsync(e => e.Id == sourceEventId);
+0258: 
+0259:         if (target == null || source == null)
+0260:         {
+0261:             return NotFound();
+0262:         }
+0263: 
+0264:         if (source.Id == target.Id)
+0265:         {
+0266:             TempData["Error"] = "Quelle und Ziel dürfen nicht dieselbe Veranstaltung sein.";
+0267:             return RedirectToAction(nameof(Details), new { id });
+0268:         }
+0269: 
+0270:         if (!source.Tasks.Any())
+0271:         {
+0272:             TempData["Error"] = "Die gewählte Veranstaltung hat keine Tasks zum Übernehmen.";
+0273:             return RedirectToAction(nameof(Details), new { id });
+0274:         }
+0275: 
+0276:         // Zeiten relativ zum jeweiligen Veranstaltungsstart übertragen, damit z. B.
+0277:         // "1 Stunde nach Start, 2 Stunden Dauer" bei der neuen Veranstaltung erhalten bleibt.
+0278:         var offsetToTarget = target.StartsAt - source.StartsAt;
+0279:         var copiedCount = 0;
+0280: 
+0281:         foreach (var sourceTask in source.Tasks)
+0282:         {
+0283:             var duration = sourceTask.EndsAt - sourceTask.StartsAt;
+0284:             var newStart = sourceTask.StartsAt + offsetToTarget;
+0285: 
+0286:             Db.Tasks.Add(new TaskItem
+0287:             {
+0288:                 EventId = target.Id,
+0289:                 Title = sourceTask.Title,
+0290:                 Description = sourceTask.Description,
+0291:                 MaxAssignees = sourceTask.MaxAssignees,
+0292:                 StartsAt = newStart,
+0293:                 EndsAt = newStart + duration,
+0294:                 CreatedById = CurrentUserId,
+0295:                 CreatedAt = DateTime.UtcNow
+0296:             });
+0297:             copiedCount++;
+0298:         }
+0299: 
+0300:         await Db.SaveChangesAsync();
+0301: 
+0302:         TempData["Success"] = copiedCount + " Task(s) von \"" + source.Name + "\" übernommen. " +
+0303:                                "Zuordnungen, Kommentare und Anhänge werden bewusst nicht mitkopiert.";
+0304:         return RedirectToAction(nameof(Details), new { id });
+0305:     }
+0306: 
+0307:     private static string? ValidateEvent(Event form)
+0308:     {
+0309:         if (string.IsNullOrWhiteSpace(form.Name))
+0310:         {
+0311:             return "Name ist erforderlich.";
+0312:         }
+0313:         if (form.EndsAt <= form.StartsAt)
+0314:         {
+0315:             return "Das Ende muss nach dem Start liegen.";
+0316:         }
+0317:         return null;
+0318:     }
+0319: }
+===== Controllers/TasksController.cs =====
+0001: using HelferApp.Data;
+0002: using HelferApp.Models;
+0003: using HelferApp.Services;
+0004: using HelferApp.ViewModels;
+0005: using Microsoft.AspNetCore.Authorization;
+0006: using Microsoft.AspNetCore.Mvc;
+0007: using Microsoft.EntityFrameworkCore;
+0008: 
+0009: namespace HelferApp.Controllers;
+0010: 
+0011: [Authorize]
+0012: public class TasksController : AuthorizedControllerBase
+0013: {
+0014:     private readonly IWebHostEnvironment _env;
+0015:     private readonly IEmailService _emailService;
+0016: 
+0017:     private static readonly HashSet<string> AllowedExtensions = new(StringComparer.OrdinalIgnoreCase)
+0018:     {
+0019:         ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".txt",
+0020:         ".doc", ".docx", ".xls", ".xlsx", ".csv", ".zip"
+0021:     };
+0022: 
+0023:     private const long MaxFileSize = 10 * 1024 * 1024; // 10 MB
+0024: 
+0025:     public TasksController(AppDbContext db, IWebHostEnvironment env, IEmailService emailService) : base(db)
+0026:     {
+0027:         _env = env;
+0028:         _emailService = emailService;
+0029:     }
+0030: 
+0031:     private string UploadDir
+0032:     {
+0033:         get
+0034:         {
+0035:             var dir = Path.Combine(_env.ContentRootPath, "Uploads");
+0036:             Directory.CreateDirectory(dir);
+0037:             return dir;
+0038:         }
+0039:     }
+0040: 
+0041:     // ---------- Übersicht ----------
+0042: 
+0043:     public async Task<IActionResult> Index()
+0044:     {
+0045:         var tasks = await Db.Tasks
+0046:             .Include(t => t.Event)
+0047:             .Include(t => t.Assignments).ThenInclude(a => a.User)
+0048:             .Include(t => t.Waitlist)
+0049:             .OrderBy(t => t.StartsAt)
+0050:             .ToListAsync();
+0051: 
+0052:         var uid = CurrentUserId;
+0053:         var items = tasks.Select(t => new TaskListItemVm
+0054:         {
+0055:             Task = t,
+0056:             Assignees = t.Assignments.Select(a => a.User).OrderBy(u => u.Username).ToList(),
+0057:             SlotsFree = t.MaxAssignees - t.Assignments.Count,
+0058:             IsAssigned = t.Assignments.Any(a => a.UserId == uid),
+0059:             IsOnWaitlist = t.Waitlist.Any(w => w.UserId == uid),
+0060:             WaitlistCount = t.Waitlist.Count
+0061:         }).ToList();
+0062: 
+0063:         return View(items);
+0064:     }
+0065: 
+0066:     // ---------- Zeitplan (Agenda-Ansicht nach Tag gruppiert) ----------
+0067: 
+0068:     public async Task<IActionResult> Schedule()
+0069:     {
+0070:         var tasks = await Db.Tasks
+0071:             .Include(t => t.Event)
+0072:             .Include(t => t.Assignments).ThenInclude(a => a.User)
+0073:             .Include(t => t.Waitlist)
+0074:             .OrderBy(t => t.StartsAt)
+0075:             .ToListAsync();
+0076: 
+0077:         var uid = CurrentUserId;
+0078:         var days = tasks
+0079:             .GroupBy(t => t.StartsAt.Date)
+0080:             .OrderBy(g => g.Key)
+0081:             .Select(g => new ScheduleDayVm
+0082:             {
+0083:                 Date = g.Key,
+0084:                 Items = g.OrderBy(t => t.StartsAt).Select(t => new TaskListItemVm
+0085:                 {
+0086:                     Task = t,
+0087:                     Assignees = t.Assignments.Select(a => a.User).OrderBy(u => u.Username).ToList(),
+0088:                     SlotsFree = t.MaxAssignees - t.Assignments.Count,
+0089:                     IsAssigned = t.Assignments.Any(a => a.UserId == uid),
+0090:                     IsOnWaitlist = t.Waitlist.Any(w => w.UserId == uid),
+0091:                     WaitlistCount = t.Waitlist.Count
+0092:                 }).ToList()
+0093:             })
+0094:             .ToList();
+0095: 
+0096:         return View(days);
+0097:     }
+0098: 
+0099:     // ---------- Detail ----------
+0100: 
+0101:     public async Task<IActionResult> Details(int id)
+0102:     {
+0103:         var task = await Db.Tasks
+0104:             .Include(t => t.Event)
+0105:             .Include(t => t.Assignments).ThenInclude(a => a.User)
+0106:             .Include(t => t.Comments).ThenInclude(c => c.User)
+0107:             .Include(t => t.Attachments).ThenInclude(a => a.UploadedBy)
+0108:             .Include(t => t.Waitlist).ThenInclude(w => w.User)
+0109:             .FirstOrDefaultAsync(t => t.Id == id);
+0110: 
+0111:         if (task == null)
+0112:         {
+0113:             return NotFound();
+0114:         }
+0115: 
+0116:         var uid = CurrentUserId;
+0117:         var vm = new TaskDetailVm
+0118:         {
+0119:             Task = task,
+0120:             Assignments = task.Assignments.OrderBy(a => a.User.Username).ToList(),
+0121:             Comments = task.Comments.OrderBy(c => c.CreatedAt).ToList(),
+0122:             Attachments = task.Attachments.OrderByDescending(a => a.CreatedAt).ToList(),
+0123:             Waitlist = task.Waitlist.OrderBy(w => w.CreatedAt).ToList(),
+0124:             SlotsFree = task.MaxAssignees - task.Assignments.Count,
+0125:             IsAssigned = task.Assignments.Any(a => a.UserId == uid),
+0126:             IsOnWaitlist = task.Waitlist.Any(w => w.UserId == uid),
+0127:             AllUsers = await Db.Users.OrderBy(u => u.Username).ToListAsync()
+0128:         };
+0129: 
+0130:         return View(vm);
+0131:     }
+0132: 
+0133:     // ---------- Selbst-Zuordnung ----------
+0134: 
+0135:     [HttpPost]
+0136:     [ValidateAntiForgeryToken]
+0137:     public async Task<IActionResult> Assign(int id)
+0138:     {
+0139:         var task = await Db.Tasks.Include(t => t.Assignments).FirstOrDefaultAsync(t => t.Id == id);
+0140:         if (task == null)
+0141:         {
+0142:             return NotFound();
+0143:         }
+0144: 
+0145:         var uid = CurrentUserId;
+0146: 
+0147:         if (task.Assignments.Any(a => a.UserId == uid))
+0148:         {
+0149:             TempData["Info"] = "Du bist diesem Task bereits zugeordnet.";
+0150:         }
+0151:         else if (task.Assignments.Count >= task.MaxAssignees)
+0152:         {
+0153:             TempData["Error"] = "Für diesen Task sind bereits alle Plätze belegt. Du kannst dich auf die Warteliste setzen.";
+0154:         }
+0155:         else
+0156:         {
+0157:             Db.TaskAssignments.Add(new TaskAssignment
+0158:             {
+0159:                 TaskId = id,
+0160:                 UserId = uid,
+0161:                 AssignedAt = DateTime.UtcNow,
+0162:                 AssignedByAdmin = false
+0163:             });
+0164:             await Db.SaveChangesAsync();
+0165:             TempData["Success"] = "Du wurdest dem Task zugeordnet.";
+0166: 
+0167:             await NotifyAssignmentAsync(id, uid, byAdmin: false);
+0168:         }
+0169: 
+0170:         return RedirectToAction(nameof(Details), new { id });
+0171:     }
+0172: 
+0173:     [HttpPost]
+0174:     [ValidateAntiForgeryToken]
+0175:     public async Task<IActionResult> Unassign(int id, int userId)
+0176:     {
+0177:         // Nur Admin darf andere entfernen, jede:r Nutzer:in sich selbst
+0178:         if (userId != CurrentUserId && !IsAdmin)
+0179:         {
+0180:             return Forbid();
+0181:         }
+0182: 
+0183:         var assignment = await Db.TaskAssignments.FirstOrDefaultAsync(a => a.TaskId == id && a.UserId == userId);
+0184:         if (assignment != null)
+0185:         {
+0186:             Db.TaskAssignments.Remove(assignment);
+0187:             await Db.SaveChangesAsync();
+0188:             TempData["Info"] = "Zuordnung entfernt.";
+0189: 
+0190:             await PromoteFromWaitlistAsync(id);
+0191:         }
+0192: 
+0193:         return RedirectToAction(nameof(Details), new { id });
+0194:     }
+0195: 
+0196:     // ---------- Warteliste ----------
+0197: 
+0198:     [HttpPost]
+0199:     [ValidateAntiForgeryToken]
+0200:     public async Task<IActionResult> JoinWaitlist(int id)
+0201:     {
+0202:         var task = await Db.Tasks
+0203:             .Include(t => t.Assignments)
+0204:             .Include(t => t.Waitlist)
+0205:             .FirstOrDefaultAsync(t => t.Id == id);
+0206: 
+0207:         if (task == null)
+0208:         {
+0209:             return NotFound();
+0210:         }
+0211: 
+0212:         var uid = CurrentUserId;
+0213: 
+0214:         if (task.Assignments.Any(a => a.UserId == uid))
+0215:         {
+0216:             TempData["Info"] = "Du bist diesem Task bereits zugeordnet.";
+0217:         }
+0218:         else if (task.Waitlist.Any(w => w.UserId == uid))
+0219:         {
+0220:             TempData["Info"] = "Du stehst bereits auf der Warteliste.";
+0221:         }
+0222:         else if (task.Assignments.Count < task.MaxAssignees)
+0223:         {
+0224:             TempData["Info"] = "Für diesen Task sind noch Plätze frei — trag dich direkt ein.";
+0225:         }
+0226:         else
+0227:         {
+0228:             Db.WaitlistEntries.Add(new WaitlistEntry
+0229:             {
+0230:                 TaskId = id,
+0231:                 UserId = uid,
+0232:                 CreatedAt = DateTime.UtcNow
+0233:             });
+0234:             await Db.SaveChangesAsync();
+0235:             TempData["Success"] = "Du wurdest auf die Warteliste gesetzt. Bei einem freien Platz rückst du automatisch nach.";
+0236:         }
+0237: 
+0238:         return RedirectToAction(nameof(Details), new { id });
+0239:     }
+0240: 
+0241:     [HttpPost]
+0242:     [ValidateAntiForgeryToken]
+0243:     public async Task<IActionResult> LeaveWaitlist(int id, int? userId = null)
+0244:     {
+0245:         var targetUserId = userId ?? CurrentUserId;
+0246: 
+0247:         // Nur Admin darf andere von der Warteliste entfernen, jede:r Nutzer:in sich selbst
+0248:         if (targetUserId != CurrentUserId && !IsAdmin)
+0249:         {
+0250:             return Forbid();
+0251:         }
+0252: 
+0253:         var entry = await Db.WaitlistEntries.FirstOrDefaultAsync(w => w.TaskId == id && w.UserId == targetUserId);
+0254:         if (entry != null)
+0255:         {
+0256:             Db.WaitlistEntries.Remove(entry);
+0257:             await Db.SaveChangesAsync();
+0258:             TempData["Info"] = "Von der Warteliste entfernt.";
+0259:         }
+0260: 
+0261:         return RedirectToAction(nameof(Details), new { id });
+0262:     }
+0263: 
+0264:     /// <summary>
+0265:     /// Rückt bei freiem Platz automatisch die/den am längsten Wartende:n nach
+0266:     /// und benachrichtigt sie/ihn per E-Mail.
+0267:     /// </summary>
+0268:     private async Task PromoteFromWaitlistAsync(int taskId)
+0269:     {
+0270:         var task = await Db.Tasks.Include(t => t.Assignments).FirstOrDefaultAsync(t => t.Id == taskId);
+0271:         if (task == null || task.Assignments.Count >= task.MaxAssignees)
+0272:         {
+0273:             return;
+0274:         }
+0275: 
+0276:         var next = await Db.WaitlistEntries
+0277:             .Include(w => w.User)
+0278:             .Where(w => w.TaskId == taskId)
+0279:             .OrderBy(w => w.CreatedAt)
+0280:             .FirstOrDefaultAsync();
+0281: 
+0282:         if (next == null)
+0283:         {
+0284:             return;
+0285:         }
+0286: 
+0287:         Db.WaitlistEntries.Remove(next);
+0288:         Db.TaskAssignments.Add(new TaskAssignment
+0289:         {
+0290:             TaskId = taskId,
+0291:             UserId = next.UserId,
+0292:             AssignedAt = DateTime.UtcNow,
+0293:             AssignedByAdmin = false
+0294:         });
+0295:         await Db.SaveChangesAsync();
+0296: 
+0297:         var subject = "Nachgerückt: " + task.Title;
+0298:         var body = "Hallo " + next.User.Username + ",\n\n" +
+0299:                    "ein Platz beim Task \"" + task.Title + "\" ist frei geworden. " +
+0300:                    "Du wurdest automatisch von der Warteliste zugeordnet.";
+0301:         await _emailService.SendAsync(next.User.Email, subject, body);
+0302:     }
+0303: 
+0304:     // ---------- Kommentare ----------
+0305: 
+0306:     [HttpPost]
+0307:     [ValidateAntiForgeryToken]
+0308:     public async Task<IActionResult> Comment(int id, string body)
+0309:     {
+0310:         var task = await Db.Tasks.Include(t => t.Assignments).ThenInclude(a => a.User).FirstOrDefaultAsync(t => t.Id == id);
+0311:         if (task == null)
+0312:         {
+0313:             return NotFound();
+0314:         }
+0315: 
+0316:         if (!string.IsNullOrWhiteSpace(body))
+0317:         {
+0318:             var commenter = await Db.Users.FindAsync(CurrentUserId);
+0319: 
+0320:             Db.Comments.Add(new Comment
+0321:             {
+0322:                 TaskId = id,
+0323:                 UserId = CurrentUserId,
+0324:                 Body = body.Trim(),
+0325:                 CreatedAt = DateTime.UtcNow
+0326:             });
+0327:             await Db.SaveChangesAsync();
+0328: 
+0329:             await NotifyNewCommentAsync(task, commenter!, body.Trim());
+0330:         }
+0331: 
+0332:         return RedirectToAction(nameof(Details), new { id });
+0333:     }
+0334: 
+0335:     // ---------- E-Mail-Benachrichtigungen ----------
+0336: 
+0337:     private async Task NotifyAssignmentAsync(int taskId, int userId, bool byAdmin)
+0338:     {
+0339:         var task = await Db.Tasks.FindAsync(taskId);
+0340:         var user = await Db.Users.FindAsync(userId);
+0341:         if (task == null || user == null)
+0342:         {
+0343:             return;
+0344:         }
+0345: 
+0346:         var subject = "Zugeordnet: " + task.Title;
+0347:         var range = task.StartsAt.ToString("dd.MM.yyyy HH:mm") + " - " + task.EndsAt.ToString("dd.MM.yyyy HH:mm");
+0348:         var byAdminNote = byAdmin ? " (durch eine Admin-Person)" : "";
+0349:         var body = "Hallo " + user.Username + ",\n\n" +
+0350:                    "du wurdest dem Task \"" + task.Title + "\" zugeordnet" + byAdminNote + ".\n" +
+0351:                    "Zeitraum: " + range;
+0352: 
+0353:         await _emailService.SendAsync(user.Email, subject, body);
+0354:     }
+0355: 
+0356:     private async Task NotifyNewCommentAsync(TaskItem task, User commenter, string commentBody)
+0357:     {
+0358:         var recipients = task.Assignments
+0359:             .Select(a => a.User)
+0360:             .Where(u => u.Id != commenter.Id)
+0361:             .DistinctBy(u => u.Id)
+0362:             .ToList();
+0363: 
+0364:         if (!recipients.Any())
+0365:         {
+0366:             return;
+0367:         }
+0368: 
+0369:         var subject = "Neuer Kommentar: " + task.Title;
+0370:         var snippet = commentBody.Length > 200 ? commentBody.Substring(0, 200) + "..." : commentBody;
+0371:         var body = commenter.Username + " hat beim Task \"" + task.Title + "\" kommentiert:\n\n" + snippet;
+0372: 
+0373:         foreach (var recipient in recipients)
+0374:         {
+0375:             await _emailService.SendAsync(recipient.Email, subject, body);
+0376:         }
+0377:     }
+0378: 
+0379:     // ---------- Anhänge ----------
+0380: 
+0381:     [HttpPost]
+0382:     [ValidateAntiForgeryToken]
+0383:     [RequestSizeLimit(MaxFileSize)]
+0384:     public async Task<IActionResult> Attachment(int id, IFormFile? file)
+0385:     {
+0386:         var exists = await Db.Tasks.AnyAsync(t => t.Id == id);
+0387:         if (!exists)
+0388:         {
+0389:             return NotFound();
+0390:         }
+0391: 
+0392:         if (file == null || file.Length == 0)
+0393:         {
+0394:             TempData["Error"] = "Keine Datei ausgewählt.";
+0395:             return RedirectToAction(nameof(Details), new { id });
+0396:         }
+0397: 
+0398:         var ext = Path.GetExtension(file.FileName);
+0399:         if (!AllowedExtensions.Contains(ext))
+0400:         {
+0401:             TempData["Error"] = "Dateityp nicht erlaubt.";
+0402:             return RedirectToAction(nameof(Details), new { id });
+0403:         }
+0404: 
+0405:         var storedName = $"{id}_{DateTime.UtcNow:yyyyMMddHHmmssfff}_{Path.GetFileName(file.FileName)}";
+0406:         var fullPath = Path.Combine(UploadDir, storedName);
+0407: 
+0408:         await using (var stream = System.IO.File.Create(fullPath))
+0409:         {
+0410:             await file.CopyToAsync(stream);
+0411:         }
+0412: 
+0413:         Db.Attachments.Add(new Attachment
+0414:         {
+0415:             TaskId = id,
+0416:             FileName = storedName,
+0417:             OriginalName = file.FileName,
+0418:             UploadedById = CurrentUserId,
+0419:             CreatedAt = DateTime.UtcNow
+0420:         });
+0421:         await Db.SaveChangesAsync();
+0422: 
+0423:         TempData["Success"] = "Anhang hochgeladen.";
+0424:         return RedirectToAction(nameof(Details), new { id });
+0425:     }
+0426: 
+0427:     public async Task<IActionResult> Download(int attachmentId)
+0428:     {
+0429:         var attachment = await Db.Attachments.FindAsync(attachmentId);
+0430:         if (attachment == null)
+0431:         {
+0432:             return NotFound();
+0433:         }
+0434: 
+0435:         var fullPath = Path.Combine(UploadDir, attachment.FileName);
+0436:         if (!System.IO.File.Exists(fullPath))
+0437:         {
+0438:             return NotFound();
+0439:         }
+0440: 
+0441:         var bytes = await System.IO.File.ReadAllBytesAsync(fullPath);
+0442:         return File(bytes, "application/octet-stream", attachment.OriginalName);
+0443:     }
+0444: 
+0445:     // ---------- Admin: Task-Verwaltung ----------
+0446: 
+0447:     [Authorize(Roles = "Admin")]
+0448:     [HttpGet]
+0449:     public async Task<IActionResult> New(int? eventId)
+0450:     {
+0451:         var events = await Db.Events.OrderBy(e => e.StartsAt).ToListAsync();
+0452:         if (!events.Any())
+0453:         {
+0454:             TempData["Error"] = "Bitte zuerst eine Veranstaltung anlegen, bevor du einen Task erstellst.";
+0455:             return RedirectToAction("New", "Events");
+0456:         }
+0457: 
+0458:         ViewBag.Events = events;
+0459: 
+0460:         var form = new TaskItem { MaxAssignees = 1 };
+0461:         if (eventId.HasValue)
+0462:         {
+0463:             form.EventId = eventId.Value;
+0464:         }
+0465: 
+0466:         return View("TaskForm", form);
+0467:     }
+0468: 
+0469:     [Authorize(Roles = "Admin")]
+0470:     [HttpPost]
+0471:     [ValidateAntiForgeryToken]
+0472:     public async Task<IActionResult> New(TaskItem form)
+0473:     {
+0474:         var error = await ValidateTaskAsync(form);
+0475:         if (error != null)
+0476:         {
+0477:             TempData["Error"] = error;
+0478:             ViewBag.Events = await Db.Events.OrderBy(e => e.StartsAt).ToListAsync();
+0479:             return View("TaskForm", form);
+0480:         }
+0481: 
+0482:         var task = new TaskItem
+0483:         {
+0484:             EventId = form.EventId,
+0485:             Title = form.Title.Trim(),
+0486:             Description = HtmlSanitizer.Sanitize(form.Description),
+0487:             MaxAssignees = Math.Max(1, form.MaxAssignees),
+0488:             StartsAt = form.StartsAt,
+0489:             EndsAt = form.EndsAt,
+0490:             CreatedById = CurrentUserId,
+0491:             CreatedAt = DateTime.UtcNow
+0492:         };
+0493: 
+0494:         Db.Tasks.Add(task);
+0495:         await Db.SaveChangesAsync();
+0496: 
+0497:         TempData["Success"] = "Task erstellt.";
+0498:         return RedirectToAction(nameof(Index));
+0499:     }
+0500: 
+===== Models/Attachment.cs =====
+0001: namespace HelferApp.Models;
+0002: 
+0003: public class Attachment
+0004: {
+0005:     public int Id { get; set; }
+0006: 
+0007:     public int TaskId { get; set; }
+0008:     public TaskItem Task { get; set; } = null!;
+0009: 
+0010:     /// <summary>Name, unter dem die Datei physisch im Uploads-Ordner liegt (eindeutig).</summary>
+0011:     public string FileName { get; set; } = "";
+0012: 
+0013:     /// <summary>Ursprünglicher Dateiname, wie er dem Nutzer angezeigt wird.</summary>
+0014:     public string OriginalName { get; set; } = "";
+0015: 
+0016:     public int UploadedById { get; set; }
+0017:     public User UploadedBy { get; set; } = null!;
+0018: 
+0019:     public DateTime CreatedAt { get; set; }
+0020: }
+===== Models/Comment.cs =====
+0001: namespace HelferApp.Models;
+0002: 
+0003: public class Comment
+0004: {
+0005:     public int Id { get; set; }
+0006: 
+0007:     public int TaskId { get; set; }
+0008:     public TaskItem Task { get; set; } = null!;
+0009: 
+0010:     public int UserId { get; set; }
+0011:     public User User { get; set; } = null!;
+0012: 
+0013:     public string Body { get; set; } = "";
+0014:     public DateTime CreatedAt { get; set; }
+0015: }
+===== Models/Event.cs =====
+0001: namespace HelferApp.Models;
+0002: 
+0003: public class Event
+0004: {
+0005:     public int Id { get; set; }
+0006:     public string Name { get; set; } = "";
+0007:     public string? Location { get; set; }
+0008: 
+0009:     /// <summary>Allgemeingültige Infos zur Veranstaltung, als HTML aus dem WYSIWYG-Editor.</summary>
+0010:     public string Description { get; set; } = "";
+0011: 
+0012:     public DateTime StartsAt { get; set; }
+0013:     public DateTime EndsAt { get; set; }
+0014: 
+0015:     public int? CreatedById { get; set; }
+0016:     public DateTime CreatedAt { get; set; }
+0017: 
+0018:     public List<TaskItem> Tasks { get; set; } = new();
+0019:     public List<EventAttachment> Attachments { get; set; } = new();
+0020: }
+===== Models/EventAttachment.cs =====
+0001: namespace HelferApp.Models;
+0002: 
+0003: public class EventAttachment
+0004: {
+0005:     public int Id { get; set; }
+0006: 
+0007:     public int EventId { get; set; }
+0008:     public Event Event { get; set; } = null!;
+0009: 
+0010:     public string FileName { get; set; } = "";
+0011:     public string OriginalName { get; set; } = "";
+0012: 
+0013:     public int UploadedById { get; set; }
+0014:     public User UploadedBy { get; set; } = null!;
+0015: 
+0016:     public DateTime CreatedAt { get; set; }
+0017: }
+===== Models/TaskAssignment.cs =====
+0001: namespace HelferApp.Models;
+0002: 
+0003: public class TaskAssignment
+0004: {
+0005:     public int TaskId { get; set; }
+0006:     public TaskItem Task { get; set; } = null!;
+0007: 
+0008:     public int UserId { get; set; }
+0009:     public User User { get; set; } = null!;
+0010: 
+0011:     public DateTime AssignedAt { get; set; }
+0012: 
+0013:     /// <summary>true = zentral durch Admin zugeordnet, false = Selbst-Eintragung</summary>
+0014:     public bool AssignedByAdmin { get; set; }
+0015: }
+===== Models/TaskItem.cs =====
+0001: namespace HelferApp.Models;
+0002: 
+0003: public class TaskItem
+0004: {
+0005:     public int Id { get; set; }
+0006: 
+0007:     /// <summary>Jeder Task muss genau einer Veranstaltung zugeordnet sein.</summary>
+0008:     public int EventId { get; set; }
+0009:     public Event Event { get; set; } = null!;
+0010: 
+0011:     public string Title { get; set; } = "";
+0012:     public string Description { get; set; } = "";
+0013: 
+0014:     /// <summary>
+0015:     /// Admin-gesteuertes Limit: wie viele Personen diesem Task maximal
+0016:     /// zugeordnet werden können.
+0017:     /// </summary>
+0018:     public int MaxAssignees { get; set; } = 1;
+0019: 
+0020:     /// <summary>Zeitraum, in dem dieser Task erledigt werden soll.</summary>
+0021:     public DateTime StartsAt { get; set; }
+0022:     public DateTime EndsAt { get; set; }
+0023: 
+0024:     public int? CreatedById { get; set; }
+0025:     public DateTime CreatedAt { get; set; }
+0026: 
+0027:     public List<TaskAssignment> Assignments { get; set; } = new();
+0028:     public List<Comment> Comments { get; set; } = new();
+0029:     public List<Attachment> Attachments { get; set; } = new();
+0030:     public List<WaitlistEntry> Waitlist { get; set; } = new();
+0031: }
+===== Models/User.cs =====
+0001: namespace HelferApp.Models;
+0002: 
+0003: public class User
+0004: {
+0005:     public int Id { get; set; }
+0006:     public string Username { get; set; } = "";
+0007:     public string Email { get; set; } = "";
+0008:     public string PasswordHash { get; set; } = "";
+0009:     public bool IsAdmin { get; set; }
+0010:     public DateTime CreatedAt { get; set; }
+0011: 
+0012:     /// <summary>Token für "Passwort vergessen"-Link, null wenn keine Anfrage läuft.</summary>
+0013:     public string? PasswordResetToken { get; set; }
+0014:     public DateTime? PasswordResetTokenExpiresAt { get; set; }
+0015: }
+===== Models/WaitlistEntry.cs =====
+0001: namespace HelferApp.Models;
+0002: 
+0003: /// <summary>
+0004: /// Wartelisten-Eintrag für einen vollen Task. Bei freiwerdendem Platz rückt
+0005: /// der älteste Eintrag (nach CreatedAt) automatisch nach.
+0006: /// </summary>
+0007: public class WaitlistEntry
+0008: {
+0009:     public int Id { get; set; }
+0010: 
+0011:     public int TaskId { get; set; }
+0012:     public TaskItem Task { get; set; } = null!;
+0013: 
+0014:     public int UserId { get; set; }
+0015:     public User User { get; set; } = null!;
+0016: 
+0017:     public DateTime CreatedAt { get; set; }
+0018: }
+===== Data/AppDbContext.cs =====
+0001: using HelferApp.Models;
+0002: using Microsoft.EntityFrameworkCore;
+0003: 
+0004: namespace HelferApp.Data;
+0005: 
+0006: public class AppDbContext : DbContext
+0007: {
+0008:     public AppDbContext(DbContextOptions<AppDbContext> options) : base(options)
+0009:     {
+0010:     }
+0011: 
+0012:     public DbSet<User> Users => Set<User>();
+0013:     public DbSet<Event> Events => Set<Event>();
+0014:     public DbSet<TaskItem> Tasks => Set<TaskItem>();
+0015:     public DbSet<TaskAssignment> TaskAssignments => Set<TaskAssignment>();
+0016:     public DbSet<Comment> Comments => Set<Comment>();
+0017:     public DbSet<Attachment> Attachments => Set<Attachment>();
+0018:     public DbSet<WaitlistEntry> WaitlistEntries => Set<WaitlistEntry>();
+0019:     public DbSet<EventAttachment> EventAttachments => Set<EventAttachment>();
+0020: 
+0021:     protected override void OnModelCreating(ModelBuilder modelBuilder)
+0022:     {
+0023:         modelBuilder.Entity<User>()
+0024:             .HasIndex(u => u.Username)
+0025:             .IsUnique();
+0026: 
+0027:         modelBuilder.Entity<User>()
+0028:             .HasIndex(u => u.Email)
+0029:             .IsUnique();
+0030: 
+0031:         modelBuilder.Entity<TaskItem>()
+0032:             .HasOne(t => t.Event)
+0033:             .WithMany(e => e.Tasks)
+0034:             .HasForeignKey(t => t.EventId)
+0035:             .OnDelete(DeleteBehavior.Restrict);
+0036: 
+0037:         modelBuilder.Entity<TaskAssignment>()
+0038:             .HasKey(ta => new { ta.TaskId, ta.UserId });
+0039: 
+0040:         modelBuilder.Entity<TaskAssignment>()
+0041:             .HasOne(ta => ta.Task)
+0042:             .WithMany(t => t.Assignments)
+0043:             .HasForeignKey(ta => ta.TaskId)
+0044:             .OnDelete(DeleteBehavior.Cascade);
+0045: 
+0046:         modelBuilder.Entity<TaskAssignment>()
+0047:             .HasOne(ta => ta.User)
+0048:             .WithMany()
+0049:             .HasForeignKey(ta => ta.UserId)
+0050:             .OnDelete(DeleteBehavior.Cascade);
+0051: 
+0052:         modelBuilder.Entity<Comment>()
+0053:             .HasOne(c => c.Task)
+0054:             .WithMany(t => t.Comments)
+0055:             .HasForeignKey(c => c.TaskId)
+0056:             .OnDelete(DeleteBehavior.Cascade);
+0057: 
+0058:         modelBuilder.Entity<Comment>()
+0059:             .HasOne(c => c.User)
+0060:             .WithMany()
+0061:             .HasForeignKey(c => c.UserId)
+0062:             .OnDelete(DeleteBehavior.Cascade);
+0063: 
+0064:         modelBuilder.Entity<Attachment>()
+0065:             .HasOne(a => a.Task)
+0066:             .WithMany(t => t.Attachments)
+0067:             .HasForeignKey(a => a.TaskId)
+0068:             .OnDelete(DeleteBehavior.Cascade);
+0069: 
+0070:         modelBuilder.Entity<Attachment>()
+0071:             .HasOne(a => a.UploadedBy)
+0072:             .WithMany()
+0073:             .HasForeignKey(a => a.UploadedById)
+0074:             .OnDelete(DeleteBehavior.Cascade);
+0075: 
+0076:         modelBuilder.Entity<WaitlistEntry>()
+0077:             .HasIndex(w => new { w.TaskId, w.UserId })
+0078:             .IsUnique();
+0079: 
+0080:         modelBuilder.Entity<WaitlistEntry>()
+0081:             .HasOne(w => w.Task)
+0082:             .WithMany(t => t.Waitlist)
+0083:             .HasForeignKey(w => w.TaskId)
+0084:             .OnDelete(DeleteBehavior.Cascade);
+0085: 
+0086:         modelBuilder.Entity<WaitlistEntry>()
+0087:             .HasOne(w => w.User)
+0088:             .WithMany()
+0089:             .HasForeignKey(w => w.UserId)
+0090:             .OnDelete(DeleteBehavior.Cascade);
+0091: 
+0092:         modelBuilder.Entity<EventAttachment>()
+0093:             .HasOne(a => a.Event)
+0094:             .WithMany(e => e.Attachments)
+0095:             .HasForeignKey(a => a.EventId)
+0096:             .OnDelete(DeleteBehavior.Cascade);
+0097: 
+0098:         modelBuilder.Entity<EventAttachment>()
+0099:             .HasOne(a => a.UploadedBy)
+0100:             .WithMany()
+0101:             .HasForeignKey(a => a.UploadedById)
+0102:             .OnDelete(DeleteBehavior.Cascade);
+0103:     }
+0104: }
+===== Services/EmailOptions.cs =====
+0001: using System.ComponentModel.DataAnnotations;
+0002: 
+0003: namespace HelferApp.Services;
+0004: 
+0005: /// <summary>Bindet an den "Email"-Abschnitt in appsettings.json.</summary>
+0006: public class EmailOptions
+0007: {
+0008:     /// <summary>Wenn false, werden E-Mails nur geloggt statt versendet (Standard, kein Setup nötig).</summary>
+0009:     public bool Enabled { get; set; }
+0010: 
+0011:     [Display(Name = "SMTP-Host")]
+0012:     public string SmtpHost { get; set; } = "";
+0013: 
+0014:     [Display(Name = "SMTP-Port")]
+0015:     [Range(1, 65535, ErrorMessage = "Bitte einen gültigen Port zwischen 1 und 65535 angeben.")]
+0016:     public int SmtpPort { get; set; } = 587;
+0017: 
+0018:     [Display(Name = "SMTP-Benutzer")]
+0019:     public string SmtpUser { get; set; } = "";
+0020: 
+0021:     [Display(Name = "SMTP-Passwort")]
+0022:     [DataType(DataType.Password)]
+0023:     public string SmtpPassword { get; set; } = "";
+0024: 
+0025:     [Display(Name = "SSL/TLS verwenden")]
+0026:     public bool EnableSsl { get; set; } = true;
+0027: 
+0028:     [Display(Name = "Absenderadresse")]
+0029:     [EmailAddress(ErrorMessage = "Bitte eine gültige Absenderadresse angeben.")]
+0030:     public string FromAddress { get; set; } = "";
+0031: 
+0032:     [Display(Name = "Absendername")]
+0033:     public string FromName { get; set; } = "Helfer-Tasks";
+0034: }
+===== Services/HtmlSanitizer.cs =====
+0001: using System.Text.RegularExpressions;
+0002: 
+0003: namespace HelferApp.Services;
+0004: 
+0005: /// <summary>
+0006: /// Einfache, regelbasierte Bereinigung von HTML aus dem WYSIWYG-Editor (Quill).
+0007: /// Nur Admins können aktuell Task-/Event-Beschreibungen speichern, trotzdem
+0008: /// als Verteidigungslinie: entfernt gefährliche Tags, Event-Handler-Attribute
+0009: /// und javascript:-Links. Kein Ersatz für eine vollwertige Sanitizer-Bibliothek,
+0010: /// aber ohne zusätzliche NuGet-Abhängigkeit nutzbar.
+0011: /// </summary>
+0012: public static class HtmlSanitizer
+0013: {
+0014:     private static readonly string[] ForbiddenTags =
+0015:     {
+0016:         "script", "iframe", "object", "embed", "form", "input", "link", "meta", "style", "svg"
+0017:     };
+0018: 
+0019:     public static string Sanitize(string? html)
+0020:     {
+0021:         if (string.IsNullOrWhiteSpace(html))
+0022:         {
+0023:             return "";
+0024:         }
+0025: 
+0026:         var result = html;
+0027: 
+0028:         foreach (var tag in ForbiddenTags)
+0029:         {
+0030:             result = Regex.Replace(result, $"<{tag}[^>]*>.*?</{tag}>", "", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+0031:             result = Regex.Replace(result, $"<{tag}[^>]*/?>", "", RegexOptions.IgnoreCase);
+0032:         }
+0033: 
+0034:         // Event-Handler-Attribute (onclick=, onerror= ...) entfernen
+0035:         result = Regex.Replace(result, @"\s+on\w+\s*=\s*(""[^""]*""|'[^']*'|[^\s>]+)", "", RegexOptions.IgnoreCase);
+0036: 
+0037:         // javascript:-Links entschärfen
+0038:         result = Regex.Replace(result, @"(href|src)\s*=\s*(""|')\s*javascript:[^""']*(""|')", "$1=\"#\"", RegexOptions.IgnoreCase);
+0039: 
+0040:         result = result.Trim();
+0041: 
+0042:         // Quill liefert bei leerem Editor "<p><br></p>" statt eines leeren Strings.
+0043:         if (result == "<p><br></p>")
+0044:         {
+0045:             return "";
+0046:         }
+0047: 
+0048:         return result;
+0049:     }
+0050: }
+===== Services/IEmailService.cs =====
+0001: namespace HelferApp.Services;
+0002: 
+0003: public interface IEmailService
+0004: {
+0005:     Task SendAsync(string toAddress, string subject, string body);
+0006: }
+===== Services/PasswordHelper.cs =====
+0001: using System.Security.Cryptography;
+0002: 
+0003: namespace HelferApp.Services;
+0004: 
+0005: /// <summary>
+0006: /// Einfaches, sicheres Passwort-Hashing per PBKDF2 (SHA-256), ohne Abhängigkeit
+0007: /// von Microsoft.AspNetCore.Identity. Format: "{salt-base64}:{hash-base64}".
+0008: /// </summary>
+0009: public static class PasswordHelper
+0010: {
+0011:     private const int SaltSize = 16;
+0012:     private const int HashSize = 32;
+0013:     private const int Iterations = 100_000;
+0014: 
+0015:     public static string Hash(string password)
+0016:     {
+0017:         var salt = RandomNumberGenerator.GetBytes(SaltSize);
+0018:         var hash = Rfc2898DeriveBytes.Pbkdf2(password, salt, Iterations, HashAlgorithmName.SHA256, HashSize);
+0019:         return $"{Convert.ToBase64String(salt)}:{Convert.ToBase64String(hash)}";
+0020:     }
+0021: 
+0022:     public static bool Verify(string password, string stored)
+0023:     {
+0024:         var parts = stored.Split(':');
+0025:         if (parts.Length != 2)
+0026:         {
+0027:             return false;
+0028:         }
+0029: 
+0030:         var salt = Convert.FromBase64String(parts[0]);
+0031:         var expected = Convert.FromBase64String(parts[1]);
+0032:         var actual = Rfc2898DeriveBytes.Pbkdf2(password, salt, Iterations, HashAlgorithmName.SHA256, HashSize);
+0033: 
+0034:         return CryptographicOperations.FixedTimeEquals(expected, actual);
+0035:     }
+0036: }
+===== Services/SmtpEmailService.cs =====
+0001: using System.Net;
+0002: using System.Net.Mail;
+0003: using Microsoft.Extensions.Logging;
+0004: using Microsoft.Extensions.Options;
+0005: 
+0006: namespace HelferApp.Services;
+0007: 
+0008: /// <summary>
+0009: /// Versendet E-Mails per SMTP, sofern in appsettings.json unter "Email"
+0010: /// konfiguriert (Enabled = true + SmtpHost gesetzt). Andernfalls wird die
+0011: /// Mail nur geloggt, damit die App auch ohne Mail-Setup lauffähig bleibt.
+0012: /// </summary>
+0013: public class SmtpEmailService : IEmailService
+0014: {
+0015:     private readonly EmailOptions _options;
+0016:     private readonly ILogger<SmtpEmailService> _logger;
+0017: 
+0018:     public SmtpEmailService(IOptions<EmailOptions> options, ILogger<SmtpEmailService> logger)
+0019:     {
+0020:         _options = options.Value;
+0021:         _logger = logger;
+0022:     }
+0023: 
+0024:     public async Task SendAsync(string toAddress, string subject, string body)
+0025:     {
+0026:         if (string.IsNullOrWhiteSpace(toAddress))
+0027:         {
+0028:             return;
+0029:         }
+0030: 
+0031:         if (!_options.Enabled || string.IsNullOrWhiteSpace(_options.SmtpHost))
+0032:         {
+0033:             _logger.LogInformation(
+0034:                 "E-Mail nicht versendet (SMTP deaktiviert/nicht konfiguriert) an {To}: {Subject}\n{Body}",
+0035:                 toAddress, subject, body);
+0036:             return;
+0037:         }
+0038: 
+0039:         using var message = new MailMessage
+0040:         {
+0041:             From = new MailAddress(_options.FromAddress, _options.FromName),
+0042:             Subject = subject,
+0043:             Body = body,
+0044:             IsBodyHtml = false
+0045:         };
+0046:         message.To.Add(toAddress);
+0047: 
+0048:         using var client = new SmtpClient(_options.SmtpHost, _options.SmtpPort)
+0049:         {
+0050:             EnableSsl = _options.EnableSsl,
+0051:             Credentials = string.IsNullOrWhiteSpace(_options.SmtpUser)
+0052:                 ? CredentialCache.DefaultNetworkCredentials
+0053:                 : new NetworkCredential(_options.SmtpUser, _options.SmtpPassword)
+0054:         };
+0055: 
+0056:         try
+0057:         {
+0058:             await client.SendMailAsync(message);
+0059:         }
+0060:         catch (Exception ex)
+0061:         {
+0062:             _logger.LogError(ex, "E-Mail-Versand an {To} fehlgeschlagen", toAddress);
+0063:         }
+0064:     }
+0065: }
+===== Services/TextHelper.cs =====
+0001: using System.Net;
+0002: using System.Text.RegularExpressions;
+0003: 
+0004: namespace HelferApp.Services;
+0005: 
+0006: /// <summary>Hilfsfunktionen für Views: Klartext-Vorschau aus WYSIWYG-HTML erzeugen.</summary>
+0007: public static class TextHelper
+0008: {
+0009:     public static string StripHtml(string? html, int maxLength = 0)
+0010:     {
+0011:         if (string.IsNullOrWhiteSpace(html))
+0012:         {
+0013:             return "";
+0014:         }
+0015: 
+0016:         var text = Regex.Replace(html, "<[^>]+>", " ");
+0017:         text = WebUtility.HtmlDecode(text);
+0018:         text = Regex.Replace(text, @"\s+", " ").Trim();
+0019: 
+0020:         if (maxLength > 0 && text.Length > maxLength)
+0021:         {
+0022:             text = text.Substring(0, maxLength) + "...";
+0023:         }
+0024: 
+0025:         return text;
+0026:     }
+0027: }
+===== ViewModels/TaskViewModels.cs =====
+0001: using HelferApp.Models;
+0002: 
+0003: namespace HelferApp.ViewModels;
+0004: 
+0005: public class TaskListItemVm
+0006: {
+0007:     public required TaskItem Task { get; set; }
+0008:     public List<User> Assignees { get; set; } = new();
+0009:     public int SlotsFree { get; set; }
+0010:     public bool IsAssigned { get; set; }
+0011:     public bool IsOnWaitlist { get; set; }
+0012:     public int WaitlistCount { get; set; }
+0013: }
+0014: 
+0015: public class TaskDetailVm
+0016: {
+0017:     public required TaskItem Task { get; set; }
+0018:     public List<TaskAssignment> Assignments { get; set; } = new();
+0019:     public List<Comment> Comments { get; set; } = new();
+0020:     public List<Attachment> Attachments { get; set; } = new();
+0021:     public List<WaitlistEntry> Waitlist { get; set; } = new();
+0022:     public int SlotsFree { get; set; }
+0023:     public bool IsAssigned { get; set; }
+0024:     public bool IsOnWaitlist { get; set; }
+0025:     public List<User> AllUsers { get; set; } = new();
+0026: }
+0027: 
+0028: public class ScheduleDayVm
+0029: {
+0030:     public DateTime Date { get; set; }
+0031:     public List<TaskListItemVm> Items { get; set; } = new();
+0032: }
+===== Views/Account/ChangePassword.cshtml =====
+0001: @{
+0002:     ViewData["Title"] = "Passwort ändern";
+0003: }
+0004: <div class="row justify-content-center">
+0005:   <div class="col-md-5">
+0006:     <div class="card shadow-sm">
+0007:       <div class="card-body">
+0008:         <h4 class="card-title mb-3">Passwort ändern</h4>
+0009:         <form method="post" action="/Account/ChangePassword">
+0010:           @Html.AntiForgeryToken()
+0011:           <div class="mb-3">
+0012:             <label class="form-label">Aktuelles Passwort</label>
+0013:             <input type="password" name="currentPassword" class="form-control" required autofocus>
+0014:           </div>
+0015:           <div class="mb-3">
+0016:             <label class="form-label">Neues Passwort</label>
+0017:             <input type="password" name="newPassword" class="form-control" required>
+0018:           </div>
+0019:           <div class="mb-3">
+0020:             <label class="form-label">Neues Passwort wiederholen</label>
+0021:             <input type="password" name="newPassword2" class="form-control" required>
+0022:           </div>
+0023:           <button type="submit" class="btn btn-primary w-100">Passwort ändern</button>
+0024:         </form>
+0025:       </div>
+0026:     </div>
+0027:   </div>
+0028: </div>
+===== Views/Account/ForgotPassword.cshtml =====
+0001: @{
+0002:     ViewData["Title"] = "Passwort vergessen";
+0003: }
+0004: <div class="row justify-content-center">
+0005:   <div class="col-md-5">
+0006:     <div class="card shadow-sm">
+0007:       <div class="card-body">
+0008:         <h4 class="card-title mb-3">Passwort vergessen</h4>
+0009:         <p class="text-muted small">Gib deine E-Mail-Adresse ein — falls ein Konto existiert, schicken wir dir einen Link zum Zurücksetzen.</p>
+0010:         <form method="post" action="/Account/ForgotPassword">
+0011:           @Html.AntiForgeryToken()
+0012:           <div class="mb-3">
+0013:             <label class="form-label">E-Mail-Adresse</label>
+0014:             <input type="email" name="email" class="form-control" required autofocus>
+0015:           </div>
+0016:           <button type="submit" class="btn btn-primary w-100">Link anfordern</button>
+0017:         </form>
+0018:         <p class="mt-3 mb-0 small text-muted"><a href="/Account/Login">Zurück zum Login</a></p>
+0019:       </div>
+0020:     </div>
+0021:   </div>
+0022: </div>
+===== Views/Account/Login.cshtml =====
+0001: @{
+0002:     ViewData["Title"] = "Login";
+0003: }
+0004: <div class="row justify-content-center">
+0005:   <div class="col-md-5">
+0006:     <div class="card shadow-sm">
+0007:       <div class="card-body">
+0008:         <h4 class="card-title mb-3">Login</h4>
+0009:         <form method="post" action="/Account/Login">
+0010:           @Html.AntiForgeryToken()
+0011:           <input type="hidden" name="returnUrl" value="@ViewData["ReturnUrl"]" />
+0012:           <div class="mb-3">
+0013:             <label class="form-label">Benutzername</label>
+0014:             <input type="text" name="username" class="form-control" required autofocus>
+0015:           </div>
+0016:           <div class="mb-3">
+0017:             <label class="form-label">Passwort</label>
+0018:             <input type="password" name="password" class="form-control" required>
+0019:           </div>
+0020:           <button type="submit" class="btn btn-primary w-100">Einloggen</button>
+0021:         </form>
+0022:         <p class="mt-3 mb-0 small text-muted">Noch kein Konto? <a href="/Account/Register">Registrieren</a></p>
+0023:         <p class="mt-2 mb-0 small text-muted"><a href="/Account/ForgotPassword">Passwort vergessen?</a></p>
+0024:         <p class="mt-2 mb-0 small text-muted">Erststart-Admin: <code>admin</code> / <code>admin123</code></p>
+0025:       </div>
+0026:     </div>
+0027:   </div>
+0028: </div>
+===== Views/Account/Register.cshtml =====
+0001: @{
+0002:     ViewData["Title"] = "Registrieren";
+0003: }
+0004: <div class="row justify-content-center">
+0005:   <div class="col-md-5">
+0006:     <div class="card shadow-sm">
+0007:       <div class="card-body">
+0008:         <h4 class="card-title mb-3">Als Helfer:in registrieren</h4>
+0009:         <form method="post" action="/Account/Register">
+0010:           @Html.AntiForgeryToken()
+0011:           <div class="mb-3">
+0012:             <label class="form-label">Benutzername</label>
+0013:             <input type="text" name="username" class="form-control" required autofocus>
+0014:           </div>
+0015:           <div class="mb-3">
+0016:             <label class="form-label">E-Mail-Adresse</label>
+0017:             <input type="email" name="email" class="form-control" required>
+0018:             <div class="form-text">Wird für Benachrichtigungen und "Passwort vergessen" verwendet.</div>
+0019:           </div>
+0020:           <div class="mb-3">
+0021:             <label class="form-label">Passwort</label>
+0022:             <input type="password" name="password" class="form-control" required>
+0023:           </div>
+0024:           <div class="mb-3">
+0025:             <label class="form-label">Passwort wiederholen</label>
+0026:             <input type="password" name="password2" class="form-control" required>
+0027:           </div>
+0028:           <button type="submit" class="btn btn-primary w-100">Konto erstellen</button>
+0029:         </form>
+0030:         <p class="mt-3 mb-0 small text-muted">Schon registriert? <a href="/Account/Login">Login</a></p>
+0031:       </div>
+0032:     </div>
+0033:   </div>
+0034: </div>
+===== Views/Account/ResetPassword.cshtml =====
+0001: @{
+0002:     ViewData["Title"] = "Passwort zurücksetzen";
+0003:     var token = ViewBag.Token as string;
+0004: }
+0005: <div class="row justify-content-center">
+0006:   <div class="col-md-5">
+0007:     <div class="card shadow-sm">
+0008:       <div class="card-body">
+0009:         <h4 class="card-title mb-3">Neues Passwort setzen</h4>
+0010:         <form method="post" action="/Account/ResetPassword">
+0011:           @Html.AntiForgeryToken()
+0012:           <input type="hidden" name="token" value="@token" />
+0013:           <div class="mb-3">
+0014:             <label class="form-label">Neues Passwort</label>
+0015:             <input type="password" name="newPassword" class="form-control" required autofocus>
+0016:           </div>
+0017:           <div class="mb-3">
+0018:             <label class="form-label">Neues Passwort wiederholen</label>
+0019:             <input type="password" name="newPassword2" class="form-control" required>
+0020:           </div>
+0021:           <button type="submit" class="btn btn-primary w-100">Passwort setzen</button>
+0022:         </form>
+0023:       </div>
+0024:     </div>
+0025:   </div>
+0026: </div>
+===== Views/Admin/Settings.cshtml =====
+0001: @model HelferApp.Services.EmailOptions
+0002: 
+0003: @{
+0004:     ViewData["Title"] = "Einstellungen";
+0005: }
+0006: 
+0007: <div class="d-flex justify-content-between align-items-center mb-4">
+0008:     <div>
+0009:         <h2 class="mb-1">Einstellungen</h2>
+0010:         <p class="text-muted mb-0">Systemdienste direkt in der Anwendung konfigurieren.</p>
+0011:     </div>
+0012:     <a class="btn btn-outline-secondary" href="/Admin/Users">Zur Benutzerverwaltung</a>
+0013: </div>
+0014: 
+0015: @if (TempData["Success"] is string success)
+0016: {
+0017:     <div class="alert alert-success">@success</div>
+0018: }
+0019: 
+0020: @if (!ViewData.ModelState.IsValid)
+0021: {
+0022:     <div class="alert alert-danger">
+0023:         Bitte prüfe die markierten Felder und speichere erneut.
+0024:     </div>
+0025: }
+0026: 
+0027: <div class="card shadow-sm">
+0028:     <div class="card-body">
+0029:         <h4 class="card-title mb-3">Mailservice</h4>
+0030: 
+0031:         <form method="post">
+0032:             @Html.AntiForgeryToken()
+0033: 
+0034:             <div class="form-check form-switch mb-4">
+0035:                 <input asp-for="Enabled" class="form-check-input" />
+0036:                 <label asp-for="Enabled" class="form-check-label"></label>
+0037:                 <div class="form-text">Wenn deaktiviert, werden E-Mails nur ins Log geschrieben.</div>
+0038:             </div>
+0039: 
+0040:             <div class="row g-3">
+0041:                 <div class="col-md-8">
+0042:                     <label asp-for="SmtpHost" class="form-label"></label>
+0043:                     <input asp-for="SmtpHost" class="form-control" placeholder="smtp.example.com" />
+0044:                     <span asp-validation-for="SmtpHost" class="text-danger"></span>
+0045:                 </div>
+0046:                 <div class="col-md-4">
+0047:                     <label asp-for="SmtpPort" class="form-label"></label>
+0048:                     <input asp-for="SmtpPort" class="form-control" />
+0049:                     <span asp-validation-for="SmtpPort" class="text-danger"></span>
+0050:                 </div>
+0051: 
+0052:                 <div class="col-md-6">
+0053:                     <label asp-for="SmtpUser" class="form-label"></label>
+0054:                     <input asp-for="SmtpUser" class="form-control" autocomplete="username" />
+0055:                     <span asp-validation-for="SmtpUser" class="text-danger"></span>
+0056:                 </div>
+0057:                 <div class="col-md-6">
+0058:                     <label asp-for="SmtpPassword" class="form-label"></label>
+0059:                     <input asp-for="SmtpPassword" class="form-control" autocomplete="new-password" />
+0060:                     <span asp-validation-for="SmtpPassword" class="text-danger"></span>
+0061:                 </div>
+0062: 
+0063:                 <div class="col-md-6">
+0064:                     <label asp-for="FromAddress" class="form-label"></label>
+0065:                     <input asp-for="FromAddress" class="form-control" placeholder="no-reply@example.com" />
+0066:                     <span asp-validation-for="FromAddress" class="text-danger"></span>
+0067:                 </div>
+0068:                 <div class="col-md-6">
+0069:                     <label asp-for="FromName" class="form-label"></label>
+0070:                     <input asp-for="FromName" class="form-control" placeholder="Helfer-Tasks" />
+0071:                     <span asp-validation-for="FromName" class="text-danger"></span>
+0072:                 </div>
+0073: 
+0074:                 <div class="col-12">
+0075:                     <div class="form-check">
+0076:                         <input asp-for="EnableSsl" class="form-check-input" />
+0077:                         <label asp-for="EnableSsl" class="form-check-label"></label>
+0078:                     </div>
+0079:                 </div>
+0080:             </div>
+0081: 
+0082:             <div class="mt-4 d-flex gap-2">
+0083:                 <button type="submit" class="btn btn-primary">Speichern</button>
+0084:                 <a href="/Tasks" class="btn btn-outline-secondary">Abbrechen</a>
+0085:             </div>
+0086:         </form>
+0087:     </div>
+0088: </div>
+0089: 
+===== Views/Admin/Users.cshtml =====
+0001: @model List<User>
+0002: @{
+0003:     ViewData["Title"] = "Nutzerverwaltung";
+0004: }
+0005: <h3 class="mb-4">Nutzerverwaltung</h3>
+0006: <table class="table bg-white shadow-sm">
+0007:   <thead>
+0008:     <tr><th>Benutzername</th><th>Rolle</th><th>Registriert am</th><th></th></tr>
+0009:   </thead>
+0010:   <tbody>
+0011:   @foreach (var u in Model)
+0012:   {
+0013:     <tr>
+0014:       <td>@u.Username</td>
+0015:       <td>
+0016:         @if (u.IsAdmin)
+0017:         {
+0018:           <span class="badge bg-primary">Admin</span>
+0019:         }
+0020:         else
+0021:         {
+0022:           <span class="badge bg-secondary">Helfer:in</span>
+0023:         }
+0024:       </td>
+0025:       <td class="text-muted small">@u.CreatedAt.ToString("yyyy-MM-dd HH:mm")</td>
+0026:       <td class="text-end">
+0027:         <form method="post" action="/Admin/ToggleAdmin">
+0028:           @Html.AntiForgeryToken()
+0029:           <input type="hidden" name="userId" value="@u.Id" />
+0030:           @{
+0031:               var isSelf = u.Id == int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
+0032:           }
+0033:           @if (isSelf)
+0034:           {
+0035:               <button type="submit" class="btn btn-sm btn-outline-secondary" disabled>
+0036:                 @(u.IsAdmin ? "Admin entziehen" : "Zu Admin machen")
+0037:               </button>
+0038:           }
+0039:           else
+0040:           {
+0041:               <button type="submit" class="btn btn-sm btn-outline-secondary">
+0042:                 @(u.IsAdmin ? "Admin entziehen" : "Zu Admin machen")
+0043:               </button>
+0044:           }
+0045:         </form>
+0046:       </td>
+0047:     </tr>
+0048:   }
+0049:   </tbody>
+0050: </table>
+0051: <a href="/Tasks">&larr; zurück zur Übersicht</a>
+===== Views/Events/CopyTasks.cshtml =====
+0001: @model List<Event>
+0002: @{
+0003:     var target = ViewBag.Target as Event;
+0004:     var targetId = target != null ? target.Id : 0;
+0005:     var targetName = target != null ? target.Name : "";
+0006:     ViewData["Title"] = "Tasks übernehmen";
+0007: }
+0008: <div class="row justify-content-center">
+0009:   <div class="col-md-7">
+0010:     <div class="card shadow-sm">
+0011:       <div class="card-body">
+0012:         <h4 class="mb-1">Tasks übernehmen</h4>
+0013:         <p class="text-muted small mb-3">
+0014:             Für Veranstaltung <strong>@targetName</strong>. Titel, Beschreibung und Personenlimit
+0015:             werden kopiert; Zeiten werden relativ zum Start der Quell-Veranstaltung übertragen.
+0016:             Zuordnungen, Kommentare und Anhänge werden nicht mitkopiert.
+0017:         </p>
+0018: 
+0019:         @if (!Model.Any())
+0020:         {
+0021:             <p class="text-muted">Keine anderen Veranstaltungen mit Tasks gefunden.</p>
+0022:             <a href="/Events/Details/@targetId" class="btn btn-outline-secondary">Zurück</a>
+0023:         }
+0024:         else
+0025:         {
+0026:             <form method="post" action="/Events/CopyTasks/@targetId">
+0027:               @Html.AntiForgeryToken()
+0028:               <div class="mb-3">
+0029:                 <label class="form-label">Von welcher Veranstaltung übernehmen?</label>
+0030:                 <select name="sourceEventId" class="form-select" required>
+0031:                   <option value="">-- auswählen --</option>
+0032:                   @foreach (var ev in Model)
+0033:                   {
+0034:                       var range = ev.StartsAt.ToString("dd.MM.yyyy");
+0035:                       var label = ev.Name + " (" + range + ", " + ev.Tasks.Count + " Task(s))";
+0036:                       <option value="@ev.Id">@label</option>
+0037:                   }
+0038:                 </select>
+0039:               </div>
+0040:               <button type="submit" class="btn btn-primary">Tasks übernehmen</button>
+0041:               <a href="/Events/Details/@targetId" class="btn btn-outline-secondary">Abbrechen</a>
+0042:             </form>
+0043:         }
+0044:       </div>
+0045:     </div>
+0046:   </div>
+0047: </div>
+===== Views/Events/Details.cshtml =====
+0001: @model Event
+0002: @{
+0003:     ViewData["Title"] = Model.Name;
+0004:     var range = Model.StartsAt.ToString("dd.MM.yyyy HH:mm") + " - " + Model.EndsAt.ToString("dd.MM.yyyy HH:mm");
+0005:     var hasDescription = !string.IsNullOrEmpty(Model.Description);
+0006: }
+0007: <div class="d-flex justify-content-between align-items-start mb-3">
+0008:   <div>
+0009:     <h3 class="mb-1">@Model.Name</h3>
+0010:     <div class="text-muted">@range</div>
+0011:     @if (!string.IsNullOrEmpty(Model.Location))
+0012:     {
+0013:         <div class="text-muted small">@Model.Location</div>
+0014:     }
+0015:   </div>
+0016:   @if (User.IsInRole("Admin"))
+0017:   {
+0018:     <div class="d-flex gap-2">
+0019:       <a href="/Tasks/New?eventId=@Model.Id" class="btn btn-sm btn-success">+ Task für diese Veranstaltung</a>
+0020:       <a href="/Events/CopyTasks/@Model.Id" class="btn btn-sm btn-outline-success">Tasks übernehmen</a>
+0021:       <a href="/Events/Edit/@Model.Id" class="btn btn-sm btn-outline-secondary">Bearbeiten</a>
+0022:       <form method="post" action="/Events/Delete/@Model.Id" onsubmit="return confirm('Veranstaltung wirklich löschen?');">
+0023:         @Html.AntiForgeryToken()
+0024:         <button type="submit" class="btn btn-sm btn-outline-danger">Löschen</button>
+0025:       </form>
+0026:     </div>
+0027:   }
+0028: </div>
+0029: 
+0030: @* Allgemeine Infos zuerst: Beschreibung + Anhänge, damit sie sofort ins Auge fallen *@
+0031: <div class="card shadow-sm mb-4">
+0032:   <div class="card-body">
+0033:     <h6 class="text-muted mb-2">Informationen zur Veranstaltung</h6>
+0034:     @if (hasDescription)
+0035:     {
+0036:         <div class="mb-3">@Html.Raw(Model.Description)</div>
+0037:     }
+0038:     else
+0039:     {
+0040:         <p class="text-muted small mb-3">Keine Beschreibung hinterlegt.</p>
+0041:     }
+0042: 
+0043:     <h6 class="text-muted mb-2 mt-3">Anhänge</h6>
+0044:     @if (Model.Attachments.Any())
+0045:     {
+0046:       <ul class="list-group mb-3">
+0047:       @foreach (var a in Model.Attachments.OrderByDescending(a => a.CreatedAt))
+0048:       {
+0049:         <li class="list-group-item d-flex justify-content-between align-items-center">
+0050:           <a href="/Events/Download/@a.Id">@a.OriginalName</a>
+0051:           <span class="text-muted small">von @a.UploadedBy.Username</span>
+0052:         </li>
+0053:       }
+0054:       </ul>
+0055:     }
+0056:     else
+0057:     {
+0058:       <p class="text-muted small">Noch keine Anhänge.</p>
+0059:     }
+0060:     <form method="post" action="/Events/Attachment/@Model.Id" enctype="multipart/form-data" class="d-flex gap-2">
+0061:       @Html.AntiForgeryToken()
+0062:       <input type="file" name="file" class="form-control form-control-sm" required>
+0063:       <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap">Hochladen</button>
+0064:     </form>
+0065:   </div>
+0066: </div>
+0067: 
+0068: <h5 class="mb-3">Tasks dieser Veranstaltung</h5>
+0069: 
+0070: @if (!Model.Tasks.Any())
+0071: {
+0072:     <p class="text-muted">Für diese Veranstaltung sind noch keine Tasks angelegt.</p>
+0073: }
+0074: 
+0075: <div class="row g-3">
+0076: @foreach (var t in Model.Tasks.OrderBy(t => t.StartsAt))
+0077: {
+0078:     var slotsFree = t.MaxAssignees - t.Assignments.Count;
+0079:     var taskRange = t.StartsAt.ToString("dd.MM.yyyy HH:mm") + " - " + t.EndsAt.ToString("dd.MM.yyyy HH:mm");
+0080:     <div class="col-md-6 col-lg-4">
+0081:       <div class="card h-100 shadow-sm">
+0082:         <div class="card-body d-flex flex-column">
+0083:           <div class="d-flex justify-content-between align-items-start mb-2">
+0084:             <h6 class="card-title mb-0">@t.Title</h6>
+0085:             @if (slotsFree > 0)
+0086:             {
+0087:                 <span class="badge bg-success">@slotsFree frei</span>
+0088:             }
+0089:             else
+0090:             {
+0091:                 <span class="badge bg-secondary">voll</span>
+0092:             }
+0093:           </div>
+0094:           <div class="small text-muted mb-2">@taskRange</div>
+0095:           <a href="/Tasks/Details/@t.Id" class="btn btn-sm btn-outline-primary mt-auto">Details</a>
+0096:         </div>
+0097:       </div>
+0098:     </div>
+0099: }
+0100: </div>
+0101: 
+0102: <a href="/Events" class="d-inline-block mt-4">&larr; zurück zur Übersicht</a>
+===== Views/Events/EventForm.cshtml =====
+0001: @model Event
+0002: @{
+0003:     var isEdit = Model.Id != 0;
+0004:     ViewData["Title"] = isEdit ? "Veranstaltung bearbeiten" : "Neue Veranstaltung";
+0005:     var formAction = isEdit ? $"/Events/Edit/{Model.Id}" : "/Events/New";
+0006:     var cancelUrl = isEdit ? $"/Events/Details/{Model.Id}" : "/Events";
+0007:     var startValue = Model.StartsAt == default ? "" : Model.StartsAt.ToString("yyyy-MM-ddTHH:mm");
+0008:     var endValue = Model.EndsAt == default ? "" : Model.EndsAt.ToString("yyyy-MM-ddTHH:mm");
+0009: }
+0010: <div class="row justify-content-center">
+0011:   <div class="col-md-7">
+0012:     <div class="card shadow-sm">
+0013:       <div class="card-body">
+0014:         <h4 class="mb-3">@(isEdit ? "Veranstaltung bearbeiten" : "Neue Veranstaltung")</h4>
+0015:         <form method="post" action="@formAction" id="eventForm">
+0016:           @Html.AntiForgeryToken()
+0017:           <div class="mb-3">
+0018:             <label class="form-label">Name *</label>
+0019:             <input type="text" name="Name" class="form-control" required value="@Model.Name" placeholder="z. B. Sommerfest 2026">
+0020:           </div>
+0021:           <div class="mb-3">
+0022:             <label class="form-label">Ort</label>
+0023:             <input type="text" name="Location" class="form-control" value="@Model.Location" placeholder="z. B. Stadtpark">
+0024:           </div>
+0025:           <div class="row">
+0026:             <div class="col-md-6 mb-3">
+0027:               <label class="form-label">Start *</label>
+0028:               <input type="datetime-local" name="StartsAt" class="form-control" required value="@startValue">
+0029:             </div>
+0030:             <div class="col-md-6 mb-3">
+0031:               <label class="form-label">Ende *</label>
+0032:               <input type="datetime-local" name="EndsAt" class="form-control" required value="@endValue">
+0033:             </div>
+0034:           </div>
+0035:           <div class="mb-3">
+0036:             <label class="form-label">Beschreibung <span class="text-muted small">(für alle Helfer:innen sichtbar)</span></label>
+0037:             <div id="descriptionEditor" class="bg-white">@Html.Raw(Model.Description)</div>
+0038:             <input type="hidden" name="Description" id="DescriptionInput">
+0039:           </div>
+0040:           <button type="submit" class="btn btn-primary">@(isEdit ? "Speichern" : "Veranstaltung anlegen")</button>
+0041:           <a href="@cancelUrl" class="btn btn-outline-secondary">Abbrechen</a>
+0042:         </form>
+0043:       </div>
+0044:     </div>
+0045:   </div>
+0046: </div>
+0047: 
+0048: @section Styles {
+0049:   <link href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css" rel="stylesheet">
+0050:   <style>
+0051:     #descriptionEditor .ql-editor { min-height: 180px; }
+0052:   </style>
+0053: }
+0054: 
+0055: @section Scripts {
+0056:   <script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
+0057:   <script>
+0058:     var descriptionQuill = new Quill('#descriptionEditor', { theme: 'snow' });
+0059:     document.getElementById('eventForm').addEventListener('submit', function () {
+0060:       document.getElementById('DescriptionInput').value = descriptionQuill.root.innerHTML;
+0061:     });
+0062:   </script>
+0063: }
+===== Views/Events/Index.cshtml =====
+0001: @model List<Event>
+0002: @{
+0003:     ViewData["Title"] = "Veranstaltungen";
+0004: }
+0005: <div class="d-flex justify-content-between align-items-center mb-4">
+0006:   <h3 class="mb-0">Veranstaltungen</h3>
+0007:   @if (User.IsInRole("Admin"))
+0008:   {
+0009:       <a href="/Events/New" class="btn btn-sm btn-success">+ Veranstaltung anlegen</a>
+0010:   }
+0011: </div>
+0012: 
+0013: @if (!Model.Any())
+0014: {
+0015:     <p class="text-muted">Noch keine Veranstaltungen angelegt.</p>
+0016: }
+0017: 
+0018: <div class="row g-3">
+0019: @foreach (var ev in Model)
+0020: {
+0021:     var range = ev.StartsAt.ToString("dd.MM.yyyy HH:mm") + " - " + ev.EndsAt.ToString("dd.MM.yyyy HH:mm");
+0022:     <div class="col-md-6 col-lg-4">
+0023:       <div class="card h-100 shadow-sm">
+0024:         <div class="card-body d-flex flex-column">
+0025:           <h5 class="card-title">@ev.Name</h5>
+0026:           <div class="small text-muted mb-1">@range</div>
+0027:           @if (!string.IsNullOrEmpty(ev.Location))
+0028:           {
+0029:               <div class="small text-muted mb-2">@ev.Location</div>
+0030:           }
+0031:           <div class="small mb-3 flex-grow-1">@ev.Tasks.Count Task(s)</div>
+0032:           <a href="/Events/Details/@ev.Id" class="btn btn-sm btn-outline-primary">Details</a>
+0033:         </div>
+0034:       </div>
+0035:     </div>
+0036: }
+0037: </div>
+===== Views/Shared/_Layout.cshtml =====
+0001: <!doctype html>
+0002: <html lang="de">
+0003: <head>
+0004:     <meta charset="utf-8" />
+0005:     <meta name="viewport" content="width=device-width, initial-scale=1" />
+0006:     <title>@ViewData["Title"] - Helfer-Tasks</title>
+0007:     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+0008:     <style>
+0009:         body { background:#f6f7f9; }
+0010:         .navbar-brand { font-weight: 600; }
+0011:         .badge-slots-free { font-size: .85rem; }
+0012:         .card-task { transition: box-shadow .15s; }
+0013:         .card-task:hover { box-shadow: 0 .25rem .75rem rgba(0,0,0,.08); }
+0014:     </style>
+0015:     @await RenderSectionAsync("Styles", required: false)
+0016: </head>
+0017: <body>
+0018: <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
+0019:     <div class="container">
+0020:         <a class="navbar-brand" href="/">🎪 Helfer-Tasks</a>
+0021:         <div class="d-flex gap-2 align-items-center">
+0022:             @if (User.Identity != null && User.Identity.IsAuthenticated)
+0023:             {
+0024:                 var adminSuffix = User.IsInRole("Admin") ? " (Admin)" : "";
+0025:                 <a href="/Events" class="btn btn-sm btn-outline-light">Veranstaltungen</a>
+0026:                 <a href="/Tasks/Schedule" class="btn btn-sm btn-outline-light">Zeitplan</a>
+0027:                 if (User.IsInRole("Admin"))
+0028:                 {
+0029:                     <a href="/Tasks/New" class="btn btn-sm btn-success">+ Task anlegen</a>
+0030:                     <a href="/Admin/Settings" class="btn btn-sm btn-outline-light">Einstellungen</a>
+0031:                 }
+0032:                 <span class="text-light small">
+0033:                     Eingeloggt als <strong>@User.Identity.Name</strong>@adminSuffix
+0034:                 </span>
+0035:                 <a href="/Account/ChangePassword" class="btn btn-sm btn-outline-light">Passwort ändern</a>
+0036:                 <form method="post" action="/Account/Logout" class="d-inline m-0">
+0037:                     @Html.AntiForgeryToken()
+0038:                     <button type="submit" class="btn btn-sm btn-outline-light">Logout</button>
+0039:                 </form>
+0040:             }
+0041:             else
+0042:             {
+0043:                 <a href="/Account/Login" class="btn btn-sm btn-outline-light">Login</a>
+0044:                 <a href="/Account/Register" class="btn btn-sm btn-light">Registrieren</a>
+0045:             }
+0046:         </div>
+0047:     </div>
+0048: </nav>
+0049: 
+0050: <div class="container pb-5">
+0051:     @if (TempData["Success"] != null)
+0052:     {
+0053:         <div class="alert alert-success alert-dismissible fade show" role="alert">
+0054:             @TempData["Success"]
+0055:             <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+0056:         </div>
+0057:     }
+0058:     @if (TempData["Error"] != null)
+0059:     {
+0060:         <div class="alert alert-danger alert-dismissible fade show" role="alert">
+0061:             @TempData["Error"]
+0062:             <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+0063:         </div>
+0064:     }
+0065:     @if (TempData["Info"] != null)
+0066:     {
+0067:         <div class="alert alert-info alert-dismissible fade show" role="alert">
+0068:             @TempData["Info"]
+0069:             <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+0070:         </div>
+0071:     }
+0072:     @if (TempData["Warning"] != null)
+0073:     {
+0074:         <div class="alert alert-warning alert-dismissible fade show" role="alert">
+0075:             @TempData["Warning"]
+0076:             <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+0077:         </div>
+0078:     }
+0079: 
+0080:     @RenderBody()
+0081: </div>
+0082: 
+0083: <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+0084: @await RenderSectionAsync("Scripts", required: false)
+0085: </body>
+0086: </html>
+===== Views/Tasks/Details.cshtml =====
+0001: @model TaskDetailVm
+0002: @{
+0003:     ViewData["Title"] = Model.Task.Title;
+0004:     var timeRange = Model.Task.StartsAt.ToString("dd.MM.yyyy HH:mm") + " - " + Model.Task.EndsAt.ToString("dd.MM.yyyy HH:mm");
+0005:     var assignmentSummary = Model.Assignments.Count + " / " + Model.Task.MaxAssignees;
+0006:     var currentUid = int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
+0007: }
+0008: <div class="d-flex justify-content-between align-items-start mb-3">
+0009:   <div>
+0010:     <h3 class="mb-1">@Model.Task.Title</h3>
+0011:     <div class="text-muted">
+0012:         Veranstaltung: <a href="/Events/Details/@Model.Task.EventId">@Model.Task.Event.Name</a>
+0013:     </div>
+0014:     <div class="text-muted small">@timeRange</div>
+0015:   </div>
+0016:   @if (User.IsInRole("Admin"))
+0017:   {
+0018:     <div class="d-flex gap-2">
+0019:       <a href="/Tasks/Edit/@Model.Task.Id" class="btn btn-sm btn-outline-secondary">Bearbeiten</a>
+0020:       <form method="post" action="/Tasks/Delete/@Model.Task.Id" onsubmit="return confirm('Task wirklich löschen?');">
+0021:         @Html.AntiForgeryToken()
+0022:         <button type="submit" class="btn btn-sm btn-outline-danger">Löschen</button>
+0023:       </form>
+0024:     </div>
+0025:   }
+0026: </div>
+0027: 
+0028: <div class="row g-4">
+0029:   <div class="col-lg-8">
+0030:     <div class="card shadow-sm mb-4">
+0031:       <div class="card-body">
+0032:         <h6 class="text-muted">Beschreibung</h6>
+0033:         @if (string.IsNullOrEmpty(Model.Task.Description))
+0034:         {
+0035:             <p class="text-muted mb-0">Keine Beschreibung hinterlegt.</p>
+0036:         }
+0037:         else
+0038:         {
+0039:             <div>@Html.Raw(Model.Task.Description)</div>
+0040:         }
+0041:       </div>
+0042:     </div>
+0043: 
+0044:     <div class="card shadow-sm mb-4">
+0045:       <div class="card-body">
+0046:         <h6 class="text-muted mb-3">Anhänge</h6>
+0047:         @if (Model.Attachments.Any())
+0048:         {
+0049:           <ul class="list-group mb-3">
+0050:           @foreach (var a in Model.Attachments)
+0051:           {
+0052:             <li class="list-group-item d-flex justify-content-between align-items-center">
+0053:               <a href="/Tasks/Download/@a.Id">@a.OriginalName</a>
+0054:               <span class="text-muted small">von @a.UploadedBy.Username</span>
+0055:             </li>
+0056:           }
+0057:           </ul>
+0058:         }
+0059:         else
+0060:         {
+0061:           <p class="text-muted small">Noch keine Anhänge.</p>
+0062:         }
+0063:         <form method="post" action="/Tasks/Attachment/@Model.Task.Id" enctype="multipart/form-data" class="d-flex gap-2">
+0064:           @Html.AntiForgeryToken()
+0065:           <input type="file" name="file" class="form-control form-control-sm" required>
+0066:           <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap">Hochladen</button>
+0067:         </form>
+0068:       </div>
+0069:     </div>
+0070: 
+0071:     <div class="card shadow-sm">
+0072:       <div class="card-body">
+0073:         <h6 class="text-muted mb-3">Kommentare</h6>
+0074:         @if (Model.Comments.Any())
+0075:         {
+0076:           foreach (var c in Model.Comments)
+0077:           {
+0078:             <div class="border-bottom pb-2 mb-2">
+0079:               <div class="small">
+0080:                 <strong>@c.User.Username</strong>
+0081:                 <span class="text-muted">@c.CreatedAt.ToString("yyyy-MM-dd HH:mm")</span>
+0082:               </div>
+0083:               <div style="white-space: pre-wrap;">@c.Body</div>
+0084:             </div>
+0085:           }
+0086:         }
+0087:         else
+0088:         {
+0089:           <p class="text-muted small">Noch keine Kommentare.</p>
+0090:         }
+0091:         <form method="post" action="/Tasks/Comment/@Model.Task.Id" class="mt-3">
+0092:           @Html.AntiForgeryToken()
+0093:           <textarea name="body" class="form-control mb-2" rows="2" placeholder="Kommentar schreiben…" required></textarea>
+0094:           <button type="submit" class="btn btn-sm btn-primary">Kommentieren</button>
+0095:         </form>
+0096:       </div>
+0097:     </div>
+0098:   </div>
+0099: 
+0100:   <div class="col-lg-4">
+0101:     <div class="card shadow-sm mb-4">
+0102:       <div class="card-body">
+0103:         <h6 class="text-muted mb-2">Zuordnung (@assignmentSummary)</h6>
+0104:         <ul class="list-group mb-3">
+0105:         @if (Model.Assignments.Any())
+0106:         {
+0107:           foreach (var a in Model.Assignments)
+0108:           {
+0109:             <li class="list-group-item d-flex justify-content-between align-items-center">
+0110:               <span>
+0111:                 @a.User.Username
+0112:                 @if (a.AssignedByAdmin)
+0113:                 {
+0114:                     <span class="badge bg-light text-dark border">admin</span>
+0115:                 }
+0116:               </span>
+0117:               @if (a.UserId == currentUid || User.IsInRole("Admin"))
+0118:               {
+0119:                 <form method="post" action="/Tasks/Unassign/@Model.Task.Id">
+0120:                   @Html.AntiForgeryToken()
+0121:                   <input type="hidden" name="userId" value="@a.UserId" />
+0122:                   <button type="submit" class="btn btn-sm btn-outline-danger">entfernen</button>
+0123:                 </form>
+0124:               }
+0125:             </li>
+0126:           }
+0127:         }
+0128:         else
+0129:         {
+0130:           <li class="list-group-item text-muted">Noch niemand zugeordnet.</li>
+0131:         }
+0132:         </ul>
+0133: 
+0134:         @if (Model.IsAssigned)
+0135:         {
+0136:           <div class="alert alert-success py-2 small mb-0">Du bist diesem Task zugeordnet.</div>
+0137:         }
+0138:         else if (Model.SlotsFree > 0)
+0139:         {
+0140:           <form method="post" action="/Tasks/Assign/@Model.Task.Id">
+0141:             @Html.AntiForgeryToken()
+0142:             <button type="submit" class="btn btn-primary w-100">Für diesen Task eintragen</button>
+0143:           </form>
+0144:         }
+0145:         else if (Model.IsOnWaitlist)
+0146:         {
+0147:           <div class="alert alert-secondary py-2 small mb-2">Alle Plätze belegt — du stehst auf der Warteliste.</div>
+0148:           <form method="post" action="/Tasks/LeaveWaitlist/@Model.Task.Id">
+0149:             @Html.AntiForgeryToken()
+0150:             <button type="submit" class="btn btn-sm btn-outline-secondary w-100">Von Warteliste entfernen</button>
+0151:           </form>
+0152:         }
+0153:         else
+0154:         {
+0155:           <div class="alert alert-secondary py-2 small mb-2">Alle Plätze belegt.</div>
+0156:           <form method="post" action="/Tasks/JoinWaitlist/@Model.Task.Id">
+0157:             @Html.AntiForgeryToken()
+0158:             <button type="submit" class="btn btn-outline-primary w-100">Auf Warteliste setzen</button>
+0159:           </form>
+0160:         }
+0161:       </div>
+0162:     </div>
+0163: 
+0164:     <div class="card shadow-sm mb-4">
+0165:       <div class="card-body">
+0166:         <h6 class="text-muted mb-2">Warteliste (@Model.Waitlist.Count)</h6>
+0167:         @if (Model.Waitlist.Any())
+0168:         {
+0169:           <ol class="list-group list-group-numbered mb-0">
+0170:           @foreach (var w in Model.Waitlist)
+0171:           {
+0172:             <li class="list-group-item d-flex justify-content-between align-items-center">
+0173:               <span>@w.User.Username</span>
+0174:               @if (w.UserId == currentUid || User.IsInRole("Admin"))
+0175:               {
+0176:                 <form method="post" action="/Tasks/LeaveWaitlist/@Model.Task.Id">
+0177:                   @Html.AntiForgeryToken()
+0178:                   <input type="hidden" name="userId" value="@w.UserId" />
+0179:                   <button type="submit" class="btn btn-sm btn-outline-danger">entfernen</button>
+0180:                 </form>
+0181:               }
+0182:             </li>
+0183:           }
+0184:           </ol>
+0185:         }
+0186:         else
+0187:         {
+0188:           <p class="text-muted small mb-0">Niemand auf der Warteliste.</p>
+0189:         }
+0190:       </div>
+0191:     </div>
+0192: 
+0193:     @if (User.IsInRole("Admin"))
+0194:     {
+0195:       <div class="card shadow-sm">
+0196:         <div class="card-body">
+0197:           <h6 class="text-muted mb-2">Admin: Person zuordnen</h6>
+0198:           <form method="post" action="/Tasks/AdminAssign/@Model.Task.Id" class="d-flex gap-2">
+0199:             @Html.AntiForgeryToken()
+0200:             <select name="userId" class="form-select form-select-sm">
+0201:             @foreach (var u in Model.AllUsers)
+0202:             {
+0203:               <option value="@u.Id">@u.Username</option>
+0204:             }
+0205:             </select>
+0206:             <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap">Zuordnen</button>
+0207:           </form>
+0208:           <p class="small text-muted mt-2 mb-0">Max. Personen für diesen Task lässt sich unter „Bearbeiten“ ändern.</p>
+0209:         </div>
+0210:       </div>
+0211:     }
+0212:   </div>
+0213: </div>
+0214: 
+0215: <a href="/Tasks" class="d-inline-block mt-4">&larr; zurück zur Übersicht</a>
+===== Views/Tasks/Index.cshtml =====
+0001: @model List<TaskListItemVm>
+0002: 
+0003: @{
+0004:     ViewData["Title"] = "Aufgaben-Übersicht";
+0005: }
+0006: 
+0007: <h3 class="mb-4">Offene und laufende Tasks</h3>
+0008: 
+0009: @if (!Model.Any())
+0010: {
+0011:     <p class="text-muted">
+0012:         Noch keine Tasks angelegt.
+0013:         @if (User.IsInRole("Admin"))
+0014:         {
+0015:             <a href="/Tasks/New">Jetzt ersten Task anlegen</a>
+0016:         }
+0017:     </p>
+0018: }
+0019: else
+0020: {
+0021:     <div class="row g-3">
+0022:         @foreach (var item in Model)
+0023:         {
+0024:             <div class="col-md-6 col-lg-4">
+0025:                 <div class="card card-task h-100 shadow-sm">
+0026:                     <div class="card-body d-flex flex-column">
+0027:                         <div class="d-flex justify-content-between align-items-start mb-2">
+0028:                             <h5 class="card-title mb-0">@item.Task.Title</h5>
+0029: 
+0030:                             @if (item.SlotsFree > 0)
+0031:                             {
+0032:                                 <span class="badge bg-success badge-slots-free">@item.SlotsFree frei</span>
+0033:                             }
+0034:                             else
+0035:                             {
+0036:                                 <span class="badge bg-secondary badge-slots-free">voll</span>
+0037:                             }
+0038:                         </div>
+0039: 
+0040:                         <div class="small mb-1">
+0041:                             <a href="/Events/Details/@item.Task.EventId">@item.Task.Event.Name</a>
+0042:                         </div>
+0043: 
+0044:                         <div class="small text-muted mb-2">
+0045:                             @(item.Task.StartsAt.ToString("dd.MM.yyyy HH:mm") + " - " + item.Task.EndsAt.ToString("dd.MM.yyyy HH:mm"))
+0046:                         </div>
+0047: 
+0048:                         <p class="card-text text-muted small flex-grow-1">
+0049:                             @item.Task.Description
+0050:                         </p>
+0051: 
+0052:                         <div class="mb-2 small">
+0053:                             <strong>Zugeordnet (@item.Assignees.Count / @item.Task.MaxAssignees):</strong>
+0054:                             @(item.Assignees.Any() ? string.Join(", ", item.Assignees.Select(a => a.Username)) : "niemand")
+0055:                         </div>
+0056: 
+0057:                         <div class="d-flex gap-2">
+0058:                             <a href="/Tasks/Details/@item.Task.Id" class="btn btn-sm btn-outline-primary flex-grow-1">Details</a>
+0059: 
+0060:                             @if (item.IsAssigned)
+0061:                             {
+0062:                                 <span class="btn btn-sm btn-outline-success disabled flex-grow-1">dabei</span>
+0063:                             }
+0064:                             else if (item.SlotsFree > 0)
+0065:                             {
+0066:                                 <form method="post" action="/Tasks/Assign/@item.Task.Id" class="flex-grow-1">
+0067:                                     @Html.AntiForgeryToken()
+0068:                                     <button type="submit" class="btn btn-sm btn-primary w-100">Eintragen</button>
+0069:                                 </form>
+0070:                             }
+0071:                             else if (item.IsOnWaitlist)
+0072:                             {
+0073:                                 <span class="btn btn-sm btn-outline-secondary disabled flex-grow-1">auf Warteliste</span>
+0074:                             }
+0075:                             else
+0076:                             {
+0077:                                 <form method="post" action="/Tasks/JoinWaitlist/@item.Task.Id" class="flex-grow-1">
+0078:                                     @Html.AntiForgeryToken()
+0079:                                     <button type="submit" class="btn btn-sm btn-outline-primary w-100">Warteliste</button>
+0080:                                 </form>
+0081:                             }
+0082:                         </div>
+0083:                     </div>
+0084:                 </div>
+0085:             </div>
+0086:         }
+0087:     </div>
+0088: }
+===== Views/Tasks/Schedule.cshtml =====
+0001: @model List<ScheduleDayVm>
+0002: @{
+0003:     ViewData["Title"] = "Zeitplan";
+0004:     var culture = new System.Globalization.CultureInfo("de-DE");
+0005: }
+0006: <h3 class="mb-4">Zeitplan</h3>
+0007: 
+0008: @if (!Model.Any())
+0009: {
+0010:     <p class="text-muted">Noch keine Tasks angelegt.</p>
+0011: }
+0012: 
+0013: @foreach (var day in Model)
+0014: {
+0015:     var dayLabel = day.Date.ToString("dddd, dd.MM.yyyy", culture);
+0016:     <h5 class="mt-4 mb-2">@dayLabel</h5>
+0017:     <div class="list-group mb-2">
+0018:     @foreach (var item in day.Items)
+0019:     {
+0020:         var t = item.Task;
+0021:         var timeLabel = t.StartsAt.ToString("HH:mm") + " - " + t.EndsAt.ToString("HH:mm");
+0022:         var slotsLabel = item.Assignees.Count + "/" + t.MaxAssignees;
+0023:         <a href="/Tasks/Details/@t.Id" class="list-group-item list-group-item-action">
+0024:           <div class="d-flex justify-content-between align-items-start">
+0025:             <div>
+0026:               <strong>@timeLabel</strong> &middot; @t.Title
+0027:               <div class="small text-muted">@t.Event.Name &middot; @slotsLabel zugeordnet</div>
+0028:             </div>
+0029:             @if (item.SlotsFree > 0)
+0030:             {
+0031:                 <span class="badge bg-success">@item.SlotsFree frei</span>
+0032:             }
+0033:             else
+0034:             {
+0035:                 <span class="badge bg-secondary">voll</span>
+0036:             }
+0037:           </div>
+0038:         </a>
+0039:     }
+0040:     </div>
+0041: }
+===== Views/Tasks/TaskForm.cshtml =====
+0001: @model TaskItem
+0002: @{
+0003:     var isEdit = Model.Id != 0;
+0004:     ViewData["Title"] = isEdit ? "Task bearbeiten" : "Neuen Task anlegen";
+0005:     var events = ViewBag.Events as List<Event> ?? new List<Event>();
+0006:     var formAction = isEdit ? $"/Tasks/Edit/{Model.Id}" : "/Tasks/New";
+0007:     var cancelUrl = isEdit ? $"/Tasks/Details/{Model.Id}" : "/Tasks";
+0008:     var startValue = Model.StartsAt == default ? "" : Model.StartsAt.ToString("yyyy-MM-ddTHH:mm");
+0009:     var endValue = Model.EndsAt == default ? "" : Model.EndsAt.ToString("yyyy-MM-ddTHH:mm");
+0010: }
+0011: <div class="row justify-content-center">
+0012:   <div class="col-md-7">
+0013:     <div class="card shadow-sm">
+0014:       <div class="card-body">
+0015:         <h4 class="mb-3">@(isEdit ? "Task bearbeiten" : "Neuen Task anlegen")</h4>
+0016:         <form method="post" action="@formAction" id="taskForm">
+0017:           @Html.AntiForgeryToken()
+0018:           <div class="mb-3">
+0019:             <label class="form-label">Veranstaltung *</label>
+0020:             <select name="EventId" class="form-select" required>
+0021:               <option value="">-- auswählen --</option>
+0022:               @foreach (var ev in events)
+0023:               {
+0024:                   var isSelected = ev.Id == Model.EventId;
+0025:                   var evLabel = ev.Name + " (" + ev.StartsAt.ToString("dd.MM.yyyy") + ")";
+0026:                   if (isSelected)
+0027:                   {
+0028:                       <option value="@ev.Id" selected>@evLabel</option>
+0029:                   }
+0030:                   else
+0031:                   {
+0032:                       <option value="@ev.Id">@evLabel</option>
+0033:                   }
+0034:               }
+0035:             </select>
+0036:           </div>
+0037:           <div class="mb-3">
+0038:             <label class="form-label">Titel *</label>
+0039:             <input type="text" name="Title" class="form-control" required value="@Model.Title">
+0040:           </div>
+0041:           <div class="row">
+0042:             <div class="col-md-6 mb-3">
+0043:               <label class="form-label">Start *</label>
+0044:               <input type="datetime-local" name="StartsAt" class="form-control" required value="@startValue">
+0045:             </div>
+0046:             <div class="col-md-6 mb-3">
+0047:               <label class="form-label">Ende *</label>
+0048:               <input type="datetime-local" name="EndsAt" class="form-control" required value="@endValue">
+0049:             </div>
+0050:           </div>
+0051:           <div class="mb-3">
+0052:             <label class="form-label">Beschreibung</label>
+0053:             <div id="descriptionEditor" class="bg-white">@Html.Raw(Model.Description)</div>
+0054:             <input type="hidden" name="Description" id="DescriptionInput">
+0055:           </div>
+0056:           <div class="mb-3">
+0057:             <label class="form-label">Maximale Anzahl Personen für diesen Task *</label>
+0058:             <input type="number" min="1" name="MaxAssignees" class="form-control" style="max-width:150px" value="@Model.MaxAssignees" required>
+0059:             <div class="form-text">Steuert, wie viele Helfer:innen sich maximal eintragen können.</div>
+0060:           </div>
+0061:           <button type="submit" class="btn btn-primary">@(isEdit ? "Speichern" : "Task anlegen")</button>
+0062:           <a href="@cancelUrl" class="btn btn-outline-secondary">Abbrechen</a>
+0063:         </form>
+0064:       </div>
+0065:     </div>
+0066:   </div>
+0067: </div>
+0068: 
+0069: @section Styles {
+0070:   <link href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css" rel="stylesheet">
+0071:   <style>
+0072:     #descriptionEditor .ql-editor { min-height: 180px; }
+0073:   </style>
+0074: }
+0075: 
+0076: @section Scripts {
+0077:   <script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
+0078:   <script>
+0079:     var descriptionQuill = new Quill('#descriptionEditor', { theme: 'snow' });
+0080:     document.getElementById('taskForm').addEventListener('submit', function () {
+0081:       document.getElementById('DescriptionInput').value = descriptionQuill.root.innerHTML;
+0082:     });
+0083:   </script>
+0084: }
+===== Views/_ViewImports.cshtml =====
+0001: @using System.Security.Claims
+0002: @using HelferApp.Models
+0003: @using HelferApp.ViewModels
+0004: @using HelferApp.Services
+0005: @addTagHelper *, Microsoft.AspNetCore.Mvc.TagHelpers
+===== Views/_ViewStart.cshtml =====
+0001: @{
+0002:     Layout = "_Layout";
+0003: }
+===== Program.cs =====
+0001: using HelferApp.Data;
+0002: using HelferApp.Models;
+0003: using HelferApp.Services;
+0004: using Microsoft.AspNetCore.Authentication.Cookies;
+0005: using Microsoft.AspNetCore.HttpOverrides;
+0006: using Microsoft.EntityFrameworkCore;
+0007: 
+0008: var builder = WebApplication.CreateBuilder(args);
+0009: 
+0010: builder.Services.AddControllersWithViews();
+0011: 
+0012: builder.Services.AddDbContext<AppDbContext>(options =>
+0013:     options.UseSqlite("Data Source=helferapp.db"));
+0014: 
+0015: builder.Services.Configure<EmailOptions>(builder.Configuration.GetSection("Email"));
+0016: builder.Services.AddSingleton<IEmailService, SmtpEmailService>();
+0017: 
+0018: builder.Services
+0019:     .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+0020:     .AddCookie(options =>
+0021:     {
+0022:         options.LoginPath = "/Account/Login";
+0023:         options.AccessDeniedPath = "/Account/Login";
+0024:         options.ExpireTimeSpan = TimeSpan.FromDays(7);
+0025:         options.SlidingExpiration = true;
+0026:     });
+0027: 
+0028: builder.Services.AddAuthorization();
+0029: 
+0030: var app = builder.Build();
+0031: 
+0032: // Ausstehende EF-Core-Migrationen anwenden (legt die DB beim allerersten Start
+0033: // auch komplett neu an). Voraussetzung: mindestens eine Migration wurde per
+0034: // "dotnet ef migrations add ..." erzeugt - siehe README.
+0035: using (var scope = app.Services.CreateScope())
+0036: {
+0037:     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+0038:     db.Database.Migrate();
+0039: 
+0040:     if (!db.Users.Any())
+0041:     {
+0042:         db.Users.Add(new User
+0043:         {
+0044:             Username = "admin",
+0045:             Email = "admin@example.com",
+0046:             PasswordHash = PasswordHelper.Hash("admin123"),
+0047:             IsAdmin = true,
+0048:             CreatedAt = DateTime.UtcNow
+0049:         });
+0050:         db.SaveChanges();
+0051: 
+0052:         Console.WriteLine(new string('=', 60));
+0053:         Console.WriteLine("Erststart: Admin-Account angelegt");
+0054:         Console.WriteLine("  Benutzername: admin");
+0055:         Console.WriteLine("  Passwort:     admin123");
+0056:         Console.WriteLine("  E-Mail:       admin@example.com (bitte per Passwort-Reset anpassen)");
+0057:         Console.WriteLine("  -> Bitte nach dem ersten Login das Passwort ändern!");
+0058:         Console.WriteLine(new string('=', 60));
+0059:     }
+0060: }
+0061: 
+0062: // Hinter einem Reverse Proxy (nginx/IIS) übernimmt diese Middleware
+0063: // X-Forwarded-For/-Proto, damit Auth-Cookies, Redirects und Logging die
+0064: // korrekte Original-Anfrage (https, echte Client-IP) sehen.
+0065: app.UseForwardedHeaders(new ForwardedHeadersOptions
+0066: {
+0067:     ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
+0068: });
+0069: 
+0070: if (!app.Environment.IsDevelopment())
+0071: {
+0072:     app.UseHsts();
+0073: }
+0074: 
+0075: app.UseStaticFiles();
+0076: app.UseRouting();
+0077: 
+0078: app.UseAuthentication();
+0079: app.UseAuthorization();
+0080: 
+0081: app.MapControllerRoute(
+0082:     name: "default",
+0083:     pattern: "{controller=Tasks}/{action=Index}/{id?}");
+0084: 
+0085: app.Run();
+===== HelferApp.csproj =====
+0001: <Project Sdk="Microsoft.NET.Sdk.Web">
+0002: 
+0003:   <PropertyGroup>
+0004:     <TargetFramework>net8.0</TargetFramework>
+0005:     <Nullable>enable</Nullable>
+0006:     <ImplicitUsings>enable</ImplicitUsings>
+0007:     <RootNamespace>HelferApp</RootNamespace>
+0008:   </PropertyGroup>
+0009: 
+0010:   <ItemGroup>
+0011:     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.8" />
+0012:     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.8">
+0013:       <PrivateAssets>all</PrivateAssets>
+0014:       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+0015:     </PackageReference>
+0016:   </ItemGroup>
+0017: 
+0018:   <ItemGroup>
+0019:     <!-- Hochgeladene Anhänge nicht als statische Dateien ausliefern, sondern über einen
+0020:          eigenen, authentifizierten Controller-Endpunkt (siehe TasksController.Download) -->
+0021:     <Content Remove="Uploads/**" />
+0022:   </ItemGroup>
+0023: 
+0024: </Project>

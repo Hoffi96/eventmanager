@@ -1,0 +1,186 @@
+@using System.Security.Claims
+@model TaskDetailVm
+@{
+    ViewData["Title"] = Model.Task.Title;
+    var timeRange = Model.Task.StartsAt.ToString("dd.MM.yyyy HH:mm") + " - " + Model.Task.EndsAt.ToString("dd.MM.yyyy HH:mm");
+    var assignmentSummary = Model.Assignments.Count + " / " + Model.Task.MaxAssignees;
+    var currentUid = int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
+}
+<div class="d-flex justify-content-between align-items-start mb-3 flex-wrap gap-2">
+  <div>
+    <h3 class="mb-1">@Model.Task.Title</h3>
+    <div class="text-muted">
+        Veranstaltung: <a href="/Events/Details/@Model.Task.EventId">@Model.Task.Event.Name</a>
+    </div>
+    <div class="text-muted small">@timeRange</div>
+  </div>
+  <div class="d-flex gap-2 flex-wrap">
+    @if (Model.IsAssigned)
+    {
+        <a href="/Tasks/Ics/@Model.Task.Id" class="btn btn-outline-primary">ICS exportieren</a>
+        <form method="post" action="/Tasks/Unassign/@Model.Task.Id" class="d-inline">
+            @Html.AntiForgeryToken()
+            <button class="btn btn-outline-danger" type="submit">Von Task abmelden</button>
+        </form>
+    }
+    else if (Model.IsOnWaitlist)
+    {
+        <form method="post" action="/Tasks/LeaveWaitlist/@Model.Task.Id" class="d-inline">
+            @Html.AntiForgeryToken()
+            <button class="btn btn-outline-warning" type="submit">Warteliste verlassen</button>
+        </form>
+    }
+    else if (Model.SlotsFree > 0)
+    {
+        <form method="post" action="/Tasks/Assign/@Model.Task.Id" class="d-inline">
+            @Html.AntiForgeryToken()
+            <button class="btn btn-primary" type="submit">Für Task eintragen</button>
+        </form>
+    }
+    else
+    {
+        <form method="post" action="/Tasks/Assign/@Model.Task.Id" class="d-inline">
+            @Html.AntiForgeryToken()
+            <button class="btn btn-warning" type="submit">Auf Warteliste setzen</button>
+        </form>
+    }
+
+    @if (User.IsInRole("Admin"))
+    {
+      <a href="/Tasks/Edit/@Model.Task.Id" class="btn btn-outline-secondary">Bearbeiten</a>
+    }
+  </div>
+</div>
+
+<div class="row g-3">
+    <div class="col-lg-8">
+        <div class="card shadow-sm mb-3">
+            <div class="card-body">
+                <div class="mb-3">
+                    <span class="badge bg-secondary">Belegung @assignmentSummary</span>
+                    <span class="badge @(Model.SlotsFree > 0 ? "bg-success" : "bg-danger")">Freie Plätze: @Model.SlotsFree</span>
+                    <span class="badge bg-warning text-dark">Warteliste: @Model.Waitlist.Count</span>
+                </div>
+                @if (!string.IsNullOrWhiteSpace(Model.Task.Description))
+                {
+                    <div>@Html.Raw(Model.Task.Description)</div>
+                }
+                else
+                {
+                    <p class="text-muted mb-0">Keine Beschreibung hinterlegt.</p>
+                }
+            </div>
+        </div>
+
+        <div class="card shadow-sm mb-3">
+            <div class="card-header">Kommentare</div>
+            <div class="card-body">
+                @if (Model.Comments.Any())
+                {
+                    <div class="list-group list-group-flush">
+                        @foreach (var comment in Model.Comments)
+                        {
+                            <div class="list-group-item px-0">
+                                <div class="small text-muted mb-1">@comment.User.Username · @comment.CreatedAt.ToLocalTime().ToString("dd.MM.yyyy HH:mm")</div>
+                                <div>@comment.Body</div>
+                            </div>
+                        }
+                    </div>
+                }
+                else
+                {
+                    <p class="text-muted">Noch keine Kommentare.</p>
+                }
+
+                <hr />
+                <form method="post" action="/Tasks/Comment/@Model.Task.Id">
+                    @Html.AntiForgeryToken()
+                    <div class="mb-3">
+                        <label class="form-label">Neuer Kommentar</label>
+                        <textarea class="form-control" name="text" rows="3" required></textarea>
+                    </div>
+                    <button class="btn btn-primary" type="submit">Kommentar speichern</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-4">
+        <div class="card shadow-sm mb-3">
+            <div class="card-header">Zugeordnete Helfende</div>
+            <div class="card-body">
+                @if (Model.Assignments.Any())
+                {
+                    <ul class="list-group list-group-flush">
+                        @foreach (var item in Model.Assignments)
+                        {
+                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
+                                <div>
+                                    <div>@item.User.Username</div>
+                                    <div class="small text-muted">@item.User.Email</div>
+                                </div>
+                                @if (User.IsInRole("Admin"))
+                                {
+                                    <form method="post" action="/Tasks/UnassignUser/@Model.Task.Id" class="d-inline">
+                                        @Html.AntiForgeryToken()
+                                        <input type="hidden" name="userId" value="@item.UserId" />
+                                        <button class="btn btn-sm btn-outline-danger" type="submit">Entfernen</button>
+                                    </form>
+                                }
+                            </li>
+                        }
+                    </ul>
+                }
+                else
+                {
+                    <p class="text-muted mb-0">Noch niemand zugeordnet.</p>
+                }
+            </div>
+        </div>
+
+        <div class="card shadow-sm mb-3">
+            <div class="card-header">Warteliste</div>
+            <div class="card-body">
+                @if (Model.Waitlist.Any())
+                {
+                    <ul class="list-group list-group-flush">
+                        @foreach (var entry in Model.Waitlist)
+                        {
+                            <li class="list-group-item px-0 d-flex justify-content-between align-items-center">
+                                <span>@entry.User.Username</span>
+                                <small class="text-muted">@entry.CreatedAt.ToLocalTime().ToString("dd.MM.yyyy HH:mm")</small>
+                            </li>
+                        }
+                    </ul>
+                }
+                else
+                {
+                    <p class="text-muted mb-0">Niemand auf der Warteliste.</p>
+                }
+            </div>
+        </div>
+
+        @if (User.IsInRole("Admin"))
+        {
+            <div class="card shadow-sm mb-3">
+                <div class="card-header">Person zentral zuordnen</div>
+                <div class="card-body">
+                    <form method="post" action="/Tasks/AssignUser/@Model.Task.Id">
+                        @Html.AntiForgeryToken()
+                        <div class="mb-3">
+                            <label class="form-label">Benutzer</label>
+                            <select class="form-select" name="userId" required>
+                                <option value="">Bitte auswählen</option>
+                                @foreach (var user in Model.AllUsers.OrderBy(u => u.Username))
+                                {
+                                    <option value="@user.Id">@user.Username (@user.Email)</option>
+                                }
+                            </select>
+                        </div>
+                        <button class="btn btn-outline-primary" type="submit">Zuordnen</button>
+                    </form>
+                </div>
+            </div>
+        }
+    </div>
+</div>

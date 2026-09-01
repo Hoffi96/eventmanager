@@ -1,0 +1,13 @@
+services:
+  eventmanagement:
+    image: hoffi1896/eventmanagement:latest
+    container_name: eventmanagement
+    restart: unless-stopped
+    ports:
+      - "8086:8080"
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      ASPNETCORE_ENVIRONMENT: Production
+    volumes:
+      - /volume1/docker/eventmanagement/data:/app/data
+      - /volume1/docker/eventmanagement/uploads:/app/Uploads

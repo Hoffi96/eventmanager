@@ -1,0 +1,11 @@
+bin/
+obj/
+.git/
+.idea/
+.vs/
+Uploads/
+helferapp.db
+helferapp.db-shm
+helferapp.db-wal
+*.db-shm
+*.db-wal

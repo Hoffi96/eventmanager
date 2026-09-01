@@ -1,0 +1,59 @@
+@model List<ScheduleDayVm>
+@{
+    ViewData["Title"] = "Zeitplan";
+    var currentFilter = (string?)ViewBag.Filter ?? "all";
+}
+
+<div class="d-flex justify-content-between align-items-start gap-3 flex-wrap mb-2">
+    <div>
+        <h2 class="mb-1">Zeitplan</h2>
+        <div class="text-muted">Aufgaben im Überblick, optional auf deine Zuordnungen gefiltert.</div>
+    </div>
+    <div class="btn-group" role="group" aria-label="Zeitplan Filter">
+        <a class="btn @(currentFilter == "all" ? "btn-primary" : "btn-outline-primary")" href="/Tasks/Schedule?filter=all">Alle Aufgaben</a>
+        <a class="btn @(currentFilter == "assigned" ? "btn-primary" : "btn-outline-primary")" href="/Tasks/Schedule?filter=assigned">Nur meine Aufgaben</a>
+    </div>
+</div>
+
+<div class="small text-muted mb-3">
+    Aktiver Filter: <strong>@(currentFilter == "assigned" ? "Nur meine Aufgaben" : "Alle Aufgaben")</strong>
+</div>
+
+@if (!Model.Any())
+{
+    <div class="alert alert-info">Für diesen Filter gibt es aktuell keine Aufgaben.</div>
+}
+else
+{
+    foreach (var day in Model)
+    {
+        <div class="card shadow-sm mb-3">
+            <div class="card-header">
+                <strong>@day.Date.ToString("dddd, dd.MM.yyyy")</strong>
+            </div>
+            <div class="list-group list-group-flush">
+                @foreach (var item in day.Items)
+                {
+                    <div class="list-group-item">
+                        <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap">
+                            <div>
+                                <div class="fw-semibold"><a class="text-decoration-none" href="/Tasks/Details/@item.Task.Id">@item.Task.Title</a></div>
+                                <div class="small text-muted">@item.Task.Event.Name</div>
+                                <div class="small text-muted">@item.Task.StartsAt.ToString("HH:mm") - @item.Task.EndsAt.ToString("HH:mm")</div>
+                            </div>
+                            <div class="d-flex gap-2 flex-wrap">
+                                <span class="badge @(item.SlotsFree > 0 ? "bg-success" : "bg-danger")">freie Plätze: @item.SlotsFree</span>
+                                <span class="badge bg-secondary">@item.Assignees.Count / @item.Task.MaxAssignees</span>
+                                <span class="badge bg-warning text-dark">Warteliste: @item.WaitlistCount</span>
+                                @if (item.IsAssigned)
+                                {
+                                    <span class="badge bg-primary">Dein Einsatz</span>
+                                }
+                            </div>
+                        </div>
+                    </div>
+                }
+            </div>
+        </div>
+    }
+}

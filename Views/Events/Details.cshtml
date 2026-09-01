@@ -1,0 +1,127 @@
+@model HelferApp.Models.Event
+@{
+    ViewData["Title"] = Model.Name;
+    var totalTasks = Model.Tasks.Count;
+    var totalSlots = Model.Tasks.Sum(t => t.MaxAssignees);
+    var totalAssigned = Model.Tasks.Sum(t => t.Assignments.Count);
+    var totalWaitlist = Model.Tasks.Sum(t => t.Waitlist.Count);
+    var canManage = User.IsInRole("Admin") || User.IsInRole("EventCoordinator");
+}
+
+<div class="d-flex justify-content-between align-items-start mb-3 flex-wrap gap-2">
+    <div>
+        <h2 class="mb-1">@Model.Name</h2>
+        <div class="text-muted">@Model.StartsAt.ToString("dd.MM.yyyy HH:mm") - @Model.EndsAt.ToString("dd.MM.yyyy HH:mm")</div>
+        @if (!string.IsNullOrWhiteSpace(Model.Location))
+        {
+            <div class="text-muted">Ort: @Model.Location</div>
+        }
+    </div>
+    <div class="d-flex gap-2 flex-wrap">
+        @if (canManage)
+        {
+            <a class="btn btn-outline-primary" href="/Events/ExportCsv/@Model.Id">CSV-Export</a>
+            <a class="btn btn-outline-secondary" href="/Events/Edit/@Model.Id">Bearbeiten</a>
+        }
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-md-3"><div class="card shadow-sm"><div class="card-body"><div class="text-muted small">Tasks</div><div class="fs-4 fw-semibold">@totalTasks</div></div></div></div>
+    <div class="col-md-3"><div class="card shadow-sm"><div class="card-body"><div class="text-muted small">Slots</div><div class="fs-4 fw-semibold">@totalSlots</div></div></div></div>
+    <div class="col-md-3"><div class="card shadow-sm"><div class="card-body"><div class="text-muted small">Zugeordnet</div><div class="fs-4 fw-semibold">@totalAssigned</div></div></div></div>
+    <div class="col-md-3"><div class="card shadow-sm"><div class="card-body"><div class="text-muted small">Warteliste</div><div class="fs-4 fw-semibold">@totalWaitlist</div></div></div></div>
+</div>
+
+@if (Model.Coordinators.Any())
+{
+    <div class="card shadow-sm mb-3">
+        <div class="card-header">Koordination</div>
+        <div class="card-body">
+            <div class="d-flex gap-2 flex-wrap">
+                @foreach (var coordinator in Model.Coordinators.OrderBy(c => c.User.Username))
+                {
+                    <span class="badge bg-primary">@coordinator.User.Username</span>
+                }
+            </div>
+        </div>
+    </div>
+}
+
+<div class="card shadow-sm mb-3">
+    <div class="card-body">
+        @if (!string.IsNullOrWhiteSpace(Model.Description))
+        {
+            @Html.Raw(Model.Description)
+        }
+        else
+        {
+            <p class="text-muted mb-0">Keine Beschreibung hinterlegt.</p>
+        }
+    </div>
+</div>
+
+<div class="card shadow-sm mb-3">
+    <div class="card-header">Tasks</div>
+    <div class="list-group list-group-flush">
+        @foreach (var task in Model.Tasks.OrderBy(t => t.StartsAt))
+        {
+            <div class="list-group-item">
+                <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap">
+                    <div>
+                        <div class="fw-semibold"><a class="text-decoration-none" href="/Tasks/Details/@task.Id">@task.Title</a></div>
+                        <div class="small text-muted">@task.StartsAt.ToString("dd.MM.yyyy HH:mm") - @task.EndsAt.ToString("HH:mm")</div>
+                    </div>
+                    <div class="d-flex gap-2 flex-wrap">
+                        <span class="badge bg-secondary">@task.Assignments.Count / @task.MaxAssignees</span>
+                        <span class="badge @(task.Assignments.Count < task.MaxAssignees ? "bg-success" : "bg-danger")">frei: @(task.MaxAssignees - task.Assignments.Count)</span>
+                        <span class="badge bg-warning text-dark">Warteliste: @task.Waitlist.Count</span>
+                    </div>
+                </div>
+            </div>
+        }
+    </div>
+</div>
+
+@if (canManage)
+{
+    <div class="card shadow-sm">
+        <div class="card-header">Anhänge</div>
+        <div class="card-body">
+            <form method="post" action="/Events/Attachment/@Model.Id" enctype="multipart/form-data" class="mb-3">
+                @Html.AntiForgeryToken()
+                <div class="row g-2 align-items-center">
+                    <div class="col-md-8">
+                        <input class="form-control" type="file" name="file" required />
+                    </div>
+                    <div class="col-md-4">
+                        <button class="btn btn-primary w-100" type="submit">Datei hochladen</button>
+                    </div>
+                </div>
+            </form>
+
+            @if (Model.Attachments.Any())
+            {
+                <div class="list-group list-group-flush">
+                    @foreach (var a in Model.Attachments.OrderByDescending(a => a.CreatedAt))
+                    {
+                        <div class="list-group-item px-0 d-flex justify-content-between align-items-center gap-2 flex-wrap">
+                            <div>
+                                <a href="/Uploads/events/@a.FileName" target="_blank">@a.OriginalName</a>
+                                <div class="small text-muted">hochgeladen von @a.UploadedBy.Username am @a.CreatedAt.ToLocalTime().ToString("dd.MM.yyyy HH:mm")</div>
+                            </div>
+                            <form method="post" action="/Events/DeleteAttachment/@Model.Id/@a.Id">
+                                @Html.AntiForgeryToken()
+                                <button class="btn btn-sm btn-outline-danger" type="submit">Löschen</button>
+                            </form>
+                        </div>
+                    }
+                </div>
+            }
+            else
+            {
+                <p class="text-muted mb-0">Noch keine Anhänge vorhanden.</p>
+            }
+        </div>
+    </div>
+}

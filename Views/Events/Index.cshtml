@@ -1,0 +1,63 @@
+@model List<HelferApp.Models.Event>
+@{
+    ViewData["Title"] = "Veranstaltungen";
+    var canManage = User.IsInRole("Admin") || User.IsInRole("EventCoordinator");
+}
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <div>
+        <h2 class="mb-0">Veranstaltungen</h2>
+        <div class="text-muted">Überblick über alle Events, Kapazitäten und Zuständigkeiten.</div>
+    </div>
+    @if (User.IsInRole("Admin"))
+    {
+        <a class="btn btn-primary" href="/Events/New">Neue Veranstaltung</a>
+    }
+</div>
+
+<div class="row g-3">
+@foreach (var ev in Model)
+{
+    var totalSlots = ev.Tasks.Sum(t => t.MaxAssignees);
+    var totalAssigned = ev.Tasks.Sum(t => t.Assignments.Count);
+    <div class="col-lg-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-start gap-3 mb-2 flex-wrap">
+                    <div>
+                        <h4 class="mb-1"><a class="text-decoration-none" href="/Events/Details/@ev.Id">@ev.Name</a></h4>
+                        <div class="text-muted small">@ev.StartsAt.ToString("dd.MM.yyyy HH:mm") - @ev.EndsAt.ToString("dd.MM.yyyy HH:mm")</div>
+                        @if (!string.IsNullOrWhiteSpace(ev.Location))
+                        {
+                            <div class="text-muted small">@ev.Location</div>
+                        }
+                    </div>
+                    @if (ev.Coordinators.Any())
+                    {
+                        <div class="d-flex gap-1 flex-wrap justify-content-end">
+                            @foreach (var coordinator in ev.Coordinators.OrderBy(c => c.User.Username))
+                            {
+                                <span class="badge bg-primary">@coordinator.User.Username</span>
+                            }
+                        </div>
+                    }
+                </div>
+
+                <div class="d-flex gap-2 flex-wrap mb-2">
+                    <span class="badge bg-secondary">Tasks: @ev.Tasks.Count</span>
+                    <span class="badge bg-info text-dark">Slots: @totalSlots</span>
+                    <span class="badge bg-success">Zugeordnet: @totalAssigned</span>
+                </div>
+
+                <div class="d-flex gap-2 flex-wrap">
+                    <a class="btn btn-sm btn-outline-primary" href="/Events/Details/@ev.Id">Details</a>
+                    @if (canManage)
+                    {
+                        <a class="btn btn-sm btn-outline-secondary" href="/Events/ExportCsv/@ev.Id">CSV</a>
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+}
+</div>

@@ -1,0 +1,711 @@
+using System.Security.Claims;
+using HelferApp.Data;
+using HelferApp.Models;
+using HelferApp.Services;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+
+namespace HelferApp.Controllers;
+
+[Authorize]
+public class TasksController : AuthorizedControllerBase
+{
+    private readonly IWebHostEnvironment _env;
+    private readonly IEmailService _emailService;
+
+    private static readonly HashSet<string> AllowedExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".png", ".jpg", ".jpeg", ".gif", ".pdf", ".txt", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".zip"
+    };
+
+    private const long MaxFileSize = 10 * 1024 * 1024;
+
+    public TasksController(AppDbContext db, IWebHostEnvironment env, IEmailService emailService) : base(db)
+    {
+        _env = env;
+        _emailService = emailService;
+    }
+
+    private string UploadDir
+    {
+        get
+        {
+            var dir = Path.Combine(_env.ContentRootPath, "Uploads", "tasks");
+            Directory.CreateDirectory(dir);
+            return dir;
+        }
+    }
+
+    public async Task<IActionResult> Index()
+    {
+        var tasks = await Db.Tasks
+            .Include(t => t.Event)
+            .Include(t => t.Assignments).ThenInclude(a => a.User)
+            .Include(t => t.Waitlist)
+            .OrderBy(t => t.StartsAt)
+            .ToListAsync();
+
+        if (!IsAdmin && IsEventCoordinator)
+        {
+            tasks = tasks.Where(t => Db.EventCoordinatorAssignments.Any(x => x.EventId == t.EventId && x.UserId == CurrentUserId)).ToList();
+        }
+
+        var model = tasks.Select(t => new TaskListItemVm
+        {
+            Task = t,
+            Assignees = t.Assignments.Select(a => a.User).OrderBy(u => u.Username).ToList(),
+            SlotsFree = Math.Max(0, t.MaxAssignees - t.Assignments.Count),
+            WaitlistCount = t.Waitlist.Count,
+            IsAssigned = t.Assignments.Any(a => a.UserId == CurrentUserId),
+            IsOnWaitlist = t.Waitlist.Any(w => w.UserId == CurrentUserId)
+        }).ToList();
+
+        return View(model);
+    }
+
+    public async Task<IActionResult> Schedule()
+    {
+        var tasks = await Db.Tasks
+            .Include(t => t.Event)
+            .Include(t => t.Assignments).ThenInclude(a => a.User)
+            .Include(t => t.Waitlist)
+            .OrderBy(t => t.StartsAt)
+            .ToListAsync();
+
+        if (!IsAdmin && IsEventCoordinator)
+        {
+            tasks = tasks.Where(t => Db.EventCoordinatorAssignments.Any(x => x.EventId == t.EventId && x.UserId == CurrentUserId)).ToList();
+        }
+
+        var model = tasks
+            .GroupBy(t => t.StartsAt.Date)
+            .OrderBy(g => g.Key)
+            .Select(g => new ScheduleDayVm
+            {
+                Date = g.Key,
+                Items = g.Select(t => new TaskListItemVm
+                {
+                    Task = t,
+                    Assignees = t.Assignments.Select(a => a.User).OrderBy(u => u.Username).ToList(),
+                    SlotsFree = Math.Max(0, t.MaxAssignees - t.Assignments.Count),
+                    WaitlistCount = t.Waitlist.Count,
+                    IsAssigned = t.Assignments.Any(a => a.UserId == CurrentUserId),
+                    IsOnWaitlist = t.Waitlist.Any(w => w.UserId == CurrentUserId)
+                }).ToList()
+            })
+            .ToList();
+
+        return View(model);
+    }
+
+    public async Task<IActionResult> Details(int id)
+    {
+        var task = await Db.Tasks
+            .Include(t => t.Event)
+            .Include(t => t.Assignments).ThenInclude(a => a.User)
+            .Include(t => t.Comments).ThenInclude(c => c.User)
+            .Include(t => t.Attachments).ThenInclude(a => a.UploadedBy)
+            .Include(t => t.Waitlist).ThenInclude(w => w.User)
+            .FirstOrDefaultAsync(t => t.Id == id);
+
+        if (task == null)
+        {
+            return NotFound();
+        }
+
+        if (!IsAdmin && IsEventCoordinator && !await CanManageEventAsync(task.EventId))
+        {
+            return Forbid();
+        }
+
+        var vm = new TaskDetailVm
+        {
+            Task = task,
+            Assignments = task.Assignments.OrderBy(a => a.User.Username).ToList(),
+            Comments = task.Comments.OrderBy(c => c.CreatedAt).ToList(),
+            Attachments = task.Attachments.OrderByDescending(a => a.CreatedAt).ToList(),
+            Waitlist = task.Waitlist.OrderBy(w => w.CreatedAt).ToList(),
+            AllUsers = IsAdmin ? await Db.Users.OrderBy(u => u.Username).ToListAsync() : new List<User>(),
+            IsAssigned = task.Assignments.Any(a => a.UserId == CurrentUserId),
+            IsOnWaitlist = task.Waitlist.Any(w => w.UserId == CurrentUserId),
+            SlotsFree = Math.Max(0, task.MaxAssignees - task.Assignments.Count)
+        };
+
+        return View(vm);
+    }
+
+    [Authorize(Roles = "Admin")]
+    [HttpGet]
+    public async Task<IActionResult> New()
+    {
+        ViewBag.Events = await Db.Events.OrderBy(e => e.StartsAt).ToListAsync();
+        return View("TaskForm", new TaskItem { StartsAt = DateTime.Now, EndsAt = DateTime.Now.AddHours(1), MaxAssignees = 1 });
+    }
+
+    [Authorize(Roles = "Admin")]
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> New(TaskItem form)
+    {
+        var error = ValidateTask(form);
+        if (error != null)
+        {
+            TempData["Error"] = error;
+            ViewBag.Events = await Db.Events.OrderBy(e => e.StartsAt).ToListAsync();
+            return View("TaskForm", form);
+        }
+
+        var task = new TaskItem
+        {
+            EventId = form.EventId,
+            Title = form.Title.Trim(),
+            Description = HtmlSanitizer.Sanitize(form.Description),
+            MaxAssignees = form.MaxAssignees,
+            StartsAt = form.StartsAt,
+            EndsAt = form.EndsAt,
+            CreatedById = CurrentUserId,
+            CreatedAt = DateTime.UtcNow
+        };
+
+        Db.Tasks.Add(task);
+        await Db.SaveChangesAsync();
+        TempData["Success"] = "Task angelegt.";
+        return RedirectToAction(nameof(Details), new { id = task.Id });
+    }
+
+    [Authorize(Roles = "Admin,EventCoordinator")]
+    [HttpGet]
+    public async Task<IActionResult> Edit(int id)
+    {
+        var task = await Db.Tasks.FindAsync(id);
+        if (task == null)
+        {
+            return NotFound();
+        }
+
+        if (!await CanManageTaskAsync(id))
+        {
+            return Forbid();
+        }
+
+        ViewBag.Events = await Db.Events.OrderBy(e => e.StartsAt).ToListAsync();
+        return View("TaskForm", task);
+    }
+
+    [Authorize(Roles = "Admin,EventCoordinator")]
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> Edit(int id, TaskItem form)
+    {
+        var task = await Db.Tasks.FindAsync(id);
+        if (task == null)
+        {
+            return NotFound();
+        }
+
+        if (!await CanManageTaskAsync(id))
+        {
+            return Forbid();
+        }
+
+        var error = ValidateTask(form);
+        if (error != null)
+        {
+            TempData["Error"] = error;
+            form.Id = id;
+            ViewBag.Events = await Db.Events.OrderBy(e => e.StartsAt).ToListAsync();
+            return View("TaskForm", form);
+        }
+
+        task.EventId = form.EventId;
+        task.Title = form.Title.Trim();
+        task.Description = HtmlSanitizer.Sanitize(form.Description);
+        task.MaxAssignees = form.MaxAssignees;
+        task.StartsAt = form.StartsAt;
+        task.EndsAt = form.EndsAt;
+
+        await Db.SaveChangesAsync();
+        TempData["Success"] = "Task aktualisiert.";
+        return RedirectToAction(nameof(Details), new { id });
+    }
+
+    [Authorize(Roles = "Admin,EventCoordinator")]
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> Delete(int id)
+    {
+        var task = await Db.Tasks
+            .Include(t => t.Assignments)
+            .Include(t => t.Attachments)
+            .Include(t => t.Comments)
+            .Include(t => t.Waitlist)
+            .FirstOrDefaultAsync(t => t.Id == id);
+
+        if (task == null)
+        {
+            return NotFound();
+        }
+
+        if (!await CanManageTaskAsync(id))
+        {
+            return Forbid();
+        }
+
+        foreach (var attachment in task.Attachments)
+        {
+            var path = Path.Combine(UploadDir, attachment.StoredFileName);
+            if (System.IO.File.Exists(path))
+            {
+                System.IO.File.Delete(path);
+            }
+        }
+
+        Db.Tasks.Remove(task);
+        await Db.SaveChangesAsync();
+        TempData["Info"] = "Task gelöscht.";
+        return RedirectToAction(nameof(Index));
+    }
+
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> Assign(int id)
+    {
+        var task = await Db.Tasks
+            .Include(t => t.Event)
+            .Include(t => t.Assignments).ThenInclude(a => a.User)
+            .Include(t => t.Waitlist).ThenInclude(w => w.User)
+            .FirstOrDefaultAsync(t => t.Id == id);
+
+        if (task == null)
+        {
+            return NotFound();
+        }
+
+        if (task.Assignments.Any(a => a.UserId == CurrentUserId))
+        {
+            TempData["Info"] = "Du bist bereits zugeordnet.";
+            return RedirectToAction(nameof(Details), new { id });
+        }
+
+        if (task.Assignments.Count < task.MaxAssignees)
+        {
+            Db.TaskAssignments.Add(new TaskAssignment
+            {
+                TaskId = task.Id,
+                UserId = CurrentUserId,
+                AssignedAt = DateTime.UtcNow,
+                AssignedByAdmin = false
+            });
+            await Db.SaveChangesAsync();
+
+            var user = await Db.Users.FindAsync(CurrentUserId);
+            if (user != null)
+            {
+                await SendAssignmentEmailAsync(task, user, false);
+            }
+
+            TempData["Success"] = "Du wurdest dem Task zugeordnet.";
+        }
+        else
+        {
+            if (!task.Waitlist.Any(w => w.UserId == CurrentUserId))
+            {
+                Db.WaitlistEntries.Add(new WaitlistEntry
+                {
+                    TaskId = task.Id,
+                    UserId = CurrentUserId,
+                    CreatedAt = DateTime.UtcNow
+                });
+                await Db.SaveChangesAsync();
+                TempData["Info"] = "Task ist voll. Du wurdest auf die Warteliste gesetzt.";
+            }
+            else
+            {
+                TempData["Info"] = "Du stehst bereits auf der Warteliste.";
+            }
+        }
+
+        return RedirectToAction(nameof(Details), new { id });
+    }
+
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> Unassign(int id)
+    {
+        var assignment = await Db.TaskAssignments.FirstOrDefaultAsync(a => a.TaskId == id && a.UserId == CurrentUserId);
+        if (assignment == null)
+        {
+            TempData["Info"] = "Du bist diesem Task nicht zugeordnet.";
+            return RedirectToAction(nameof(Details), new { id });
+        }
+
+        Db.TaskAssignments.Remove(assignment);
+
+        var task = await Db.Tasks
+            .Include(t => t.Event)
+            .Include(t => t.Waitlist).ThenInclude(w => w.User)
+            .FirstOrDefaultAsync(t => t.Id == id);
+
+        User? promotedUser = null;
+        if (task != null)
+        {
+            promotedUser = await PromoteFirstWaitlistEntryAsync(task);
+        }
+
+        await Db.SaveChangesAsync();
+
+        if (task != null && promotedUser != null)
+        {
+            await SendAssignmentEmailAsync(task, promotedUser, true);
+        }
+
+        TempData["Success"] = "Du wurdest vom Task abgemeldet.";
+        return RedirectToAction(nameof(Details), new { id });
+    }
+
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> LeaveWaitlist(int id)
+    {
+        var entry = await Db.WaitlistEntries.FirstOrDefaultAsync(w => w.TaskId == id && w.UserId == CurrentUserId);
+        if (entry == null)
+        {
+            TempData["Info"] = "Du stehst nicht auf der Warteliste.";
+        }
+        else
+        {
+            Db.WaitlistEntries.Remove(entry);
+            await Db.SaveChangesAsync();
+            TempData["Success"] = "Du hast die Warteliste verlassen.";
+        }
+
+        return RedirectToAction(nameof(Details), new { id });
+    }
+
+    [Authorize(Roles = "Admin,EventCoordinator")]
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AssignUser(int id, int userId)
+    {
+        var task = await Db.Tasks
+            .Include(t => t.Event)
+            .Include(t => t.Assignments).ThenInclude(a => a.User)
+            .Include(t => t.Waitlist).ThenInclude(w => w.User)
+            .FirstOrDefaultAsync(t => t.Id == id);
+
+        if (task == null)
+        {
+            return NotFound();
+        }
+
+        if (!await CanManageTaskAsync(id))
+        {
+            return Forbid();
+        }
+
+        if (!task.Assignments.Any(a => a.UserId == userId) && task.Assignments.Count < task.MaxAssignees)
+        {
+            Db.TaskAssignments.Add(new TaskAssignment
+            {
+                TaskId = id,
+                UserId = userId,
+                AssignedAt = DateTime.UtcNow,
+                AssignedByAdmin = true
+            });
+
+            var waitlistEntry = task.Waitlist.FirstOrDefault(w => w.UserId == userId);
+            if (waitlistEntry != null)
+            {
+                Db.WaitlistEntries.Remove(waitlistEntry);
+            }
+
+            await Db.SaveChangesAsync();
+
+            var user = await Db.Users.FindAsync(userId);
+            if (user != null)
+            {
+                await SendAssignmentEmailAsync(task, user, false);
+            }
+
+            TempData["Success"] = "Person wurde zugeordnet.";
+        }
+        else
+        {
+            TempData["Error"] = "Zuordnung nicht möglich.";
+        }
+
+        return RedirectToAction(nameof(Details), new { id });
+    }
+
+    [Authorize(Roles = "Admin,EventCoordinator")]
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> UnassignUser(int id, int userId)
+    {
+        var task = await Db.Tasks
+            .Include(t => t.Event)
+            .Include(t => t.Waitlist).ThenInclude(w => w.User)
+            .FirstOrDefaultAsync(t => t.Id == id);
+
+        if (task == null)
+        {
+            return NotFound();
+        }
+
+        if (!await CanManageTaskAsync(id))
+        {
+            return Forbid();
+        }
+
+        var assignment = await Db.TaskAssignments.FirstOrDefaultAsync(a => a.TaskId == id && a.UserId == userId);
+        if (assignment != null)
+        {
+            Db.TaskAssignments.Remove(assignment);
+            var promotedUser = await PromoteFirstWaitlistEntryAsync(task);
+            await Db.SaveChangesAsync();
+
+            if (promotedUser != null)
+            {
+                await SendAssignmentEmailAsync(task, promotedUser, true);
+            }
+
+            TempData["Info"] = "Zuordnung entfernt.";
+        }
+
+        return RedirectToAction(nameof(Details), new { id });
+    }
+
+    [HttpGet]
+    public async Task<IActionResult> Ics(int id)
+    {
+        var task = await Db.Tasks
+            .Include(t => t.Event)
+            .Include(t => t.Assignments)
+            .FirstOrDefaultAsync(t => t.Id == id);
+
+        if (task == null)
+        {
+            return NotFound();
+        }
+
+        var assigned = task.Assignments.Any(a => a.UserId == CurrentUserId);
+        var canManage = await CanManageTaskAsync(task.Id);
+        if (!assigned && !canManage)
+        {
+            return Forbid();
+        }
+
+        var content = BuildIcs(task);
+        var fileName = SanitizeFileName(task.Title) + ".ics";
+        return File(System.Text.Encoding.UTF8.GetBytes(content), "text/calendar", fileName);
+    }
+
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> Comment(int id, string text)
+    {
+        var task = await Db.Tasks
+            .Include(t => t.Event)
+            .Include(t => t.Assignments).ThenInclude(a => a.User)
+            .FirstOrDefaultAsync(t => t.Id == id);
+
+        if (task == null)
+        {
+            return NotFound();
+        }
+
+        text = (text ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            TempData["Error"] = "Kommentar darf nicht leer sein.";
+            return RedirectToAction(nameof(Details), new { id });
+        }
+
+        Db.Comments.Add(new Comment
+        {
+            TaskId = id,
+            UserId = CurrentUserId,
+            Body = text,
+            CreatedAt = DateTime.UtcNow
+        });
+        await Db.SaveChangesAsync();
+
+        var currentUser = await Db.Users.FindAsync(CurrentUserId);
+        if (currentUser != null)
+        {
+            await NotifyCommentRecipientsAsync(task, currentUser, text);
+        }
+
+        TempData["Success"] = "Kommentar gespeichert.";
+        return RedirectToAction(nameof(Details), new { id });
+    }
+
+    private async Task<User?> PromoteFirstWaitlistEntryAsync(TaskItem task)
+    {
+        var next = task.Waitlist.OrderBy(w => w.CreatedAt).FirstOrDefault();
+        if (next == null)
+        {
+            return null;
+        }
+
+        Db.WaitlistEntries.Remove(next);
+        Db.TaskAssignments.Add(new TaskAssignment
+        {
+            TaskId = task.Id,
+            UserId = next.UserId,
+            AssignedAt = DateTime.UtcNow,
+            AssignedByAdmin = false
+        });
+
+        return next.User ?? await Db.Users.FindAsync(next.UserId);
+    }
+
+    private async Task SendAssignmentEmailAsync(TaskItem task, User user, bool movedUpFromWaitlist)
+    {
+        if (string.IsNullOrWhiteSpace(user.Email))
+        {
+            return;
+        }
+
+        var subject = movedUpFromWaitlist
+            ? $"Du bist nachgerückt: {task.Title}"
+            : $"Task-Zuweisung: {task.Title}";
+
+        var body = $@"Hallo {user.Username},
+
+Du bist {(movedUpFromWaitlist ? "von der Warteliste nachgerückt und jetzt" : "jetzt")} dem Task '{task.Title}' zugeordnet.
+Veranstaltung: {task.Event?.Name}
+Zeit: {task.StartsAt:dd.MM.yyyy HH:mm} - {task.EndsAt:dd.MM.yyyy HH:mm}
+
+Viele Grüße
+Helfer-Tasks";
+
+        await _emailService.SendAsync(user.Email, subject, body);
+    }
+
+    private async Task NotifyCommentRecipientsAsync(TaskItem task, User author, string commentText)
+    {
+        var recipients = task.Assignments
+            .Where(a => a.UserId != author.Id && !string.IsNullOrWhiteSpace(a.User.Email))
+            .Select(a => a.User)
+            .DistinctBy(u => u.Id)
+            .ToList();
+
+        foreach (var recipient in recipients)
+        {
+            var subject = $"Neuer Kommentar zu: {task.Title}";
+            var body = $@"Hallo {recipient.Username},
+
+{author.Username} hat einen neuen Kommentar zum Task '{task.Title}' geschrieben:
+
+\"{commentText}\"
+
+Zeit des Tasks: {task.StartsAt:dd.MM.yyyy HH:mm} - {task.EndsAt:dd.MM.yyyy HH:mm}
+Veranstaltung: {task.Event?.Name}
+
+Viele Grüße
+Helfer-Tasks";
+
+            await _emailService.SendAsync(recipient.Email, subject, body);
+        }
+    }
+
+    private static string BuildIcs(TaskItem task)
+    {
+        static string Escape(string? value) => (value ?? string.Empty)
+            .Replace("\\", "\\\\")
+            .Replace(";", "\\;")
+            .Replace(",", "\\,")
+            .Replace("\r\n", "\\n")
+            .Replace("\n", "\\n");
+
+        var uid = $"task-{task.Id}@helferapp.local";
+        var stamp = DateTime.UtcNow.ToString("yyyyMMdd'T'HHmmss'Z'");
+        var start = task.StartsAt.ToUniversalTime().ToString("yyyyMMdd'T'HHmmss'Z'");
+        var end = task.EndsAt.ToUniversalTime().ToString("yyyyMMdd'T'HHmmss'Z'");
+        var summary = Escape(task.Title);
+        var description = Escape($"Veranstaltung: {task.Event?.Name}\n{task.Description}");
+        var location = Escape(task.Event?.Location);
+
+        return string.Join("\r\n", new[]
+        {
+            "BEGIN:VCALENDAR",
+            "VERSION:2.0",
+            "PRODID:-//HelferApp//Task Calendar//DE",
+            "CALSCALE:GREGORIAN",
+            "BEGIN:VEVENT",
+            $"UID:{uid}",
+            $"DTSTAMP:{stamp}",
+            $"DTSTART:{start}",
+            $"DTEND:{end}",
+            $"SUMMARY:{summary}",
+            $"DESCRIPTION:{description}",
+            $"LOCATION:{location}",
+            "END:VEVENT",
+            "END:VCALENDAR"
+        });
+    }
+
+    private static string SanitizeFileName(string value)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var cleaned = new string(value.Select(ch => invalid.Contains(ch) ? '-' : ch).ToArray()).Trim();
+        return string.IsNullOrWhiteSpace(cleaned) ? "task" : cleaned;
+    }
+
+    private static string? ValidateTask(TaskItem form)
+    {
+        if (form.EventId <= 0)
+        {
+            return "Bitte eine Veranstaltung auswählen.";
+        }
+
+        if (string.IsNullOrWhiteSpace(form.Title))
+        {
+            return "Bitte einen Titel angeben.";
+        }
+
+        if (form.EndsAt <= form.StartsAt)
+        {
+            return "Ende muss nach dem Start liegen.";
+        }
+
+        if (form.MaxAssignees < 1)
+        {
+            return "Mindestens 1 Person erforderlich.";
+        }
+
+        return null;
+    }
+}
+
+
+public class TaskListItemVm
+{
+    public TaskItem Task { get; set; } = null!;
+    public List<User> Assignees { get; set; } = new();
+    public int SlotsFree { get; set; }
+    public int WaitlistCount { get; set; }
+    public bool IsAssigned { get; set; }
+    public bool IsOnWaitlist { get; set; }
+}
+
+public class ScheduleDayVm
+{
+    public DateTime Date { get; set; }
+    public List<TaskListItemVm> Items { get; set; } = new();
+}
+
+public class TaskDetailVm
+{
+    public TaskItem Task { get; set; } = null!;
+    public List<TaskAssignment> Assignments { get; set; } = new();
+    public List<Comment> Comments { get; set; } = new();
+    public List<Attachment> Attachments { get; set; } = new();
+    public List<WaitlistEntry> Waitlist { get; set; } = new();
+    public List<User> AllUsers { get; set; } = new();
+    public bool IsAssigned { get; set; }
+    public bool IsOnWaitlist { get; set; }
+    public int SlotsFree { get; set; }
+}

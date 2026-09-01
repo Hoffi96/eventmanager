@@ -1,0 +1,108 @@
+@model TaskItem
+@{
+    var isEdit = Model.Id != 0;
+    ViewData["Title"] = isEdit ? "Task bearbeiten" : "Neuen Task anlegen";
+    var events = ViewBag.Events as List<Event> ?? new List<Event>();
+    var formAction = isEdit ? $"/Tasks/Edit/{Model.Id}" : "/Tasks/New";
+    var cancelUrl = isEdit ? $"/Tasks/Details/{Model.Id}" : "/Tasks";
+    var startValue = Model.StartsAt == default ? "" : Model.StartsAt.ToString("yyyy-MM-ddTHH:mm");
+    var endValue = Model.EndsAt == default ? "" : Model.EndsAt.ToString("yyyy-MM-ddTHH:mm");
+}
+<div class="row justify-content-center">
+  <div class="col-md-7">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="mb-3">@(isEdit ? "Task bearbeiten" : "Neuen Task anlegen")</h4>
+
+        @if (!ViewData.ModelState.IsValid)
+        {
+          <div class="alert alert-danger">
+            <strong>Bitte prüfe die Eingaben.</strong>
+            <ul class="mb-0 mt-2">
+              @foreach (var entry in ViewData.ModelState.Values)
+              {
+                  foreach (var error in entry.Errors)
+                  {
+                      <li>@error.ErrorMessage</li>
+                  }
+              }
+            </ul>
+          </div>
+        }
+
+        @if (!isEdit && !events.Any())
+        {
+          <div class="alert alert-warning">
+            Es gibt noch keine Veranstaltungen. Bitte zuerst unter <a href="/Events">Veranstaltungen</a> mindestens eine Veranstaltung anlegen, bevor ein Task erstellt werden kann.
+          </div>
+        }
+
+        <form method="post" action="@formAction" id="taskForm">
+          @Html.AntiForgeryToken()
+          <div class="mb-3">
+            <label class="form-label">Veranstaltung *</label>
+            <select name="EventId" class="form-select" required>
+              <option value="">-- auswählen --</option>
+              @foreach (var ev in events)
+              {
+                  var isSelected = ev.Id == Model.EventId;
+                  var evLabel = ev.Name + " (" + ev.StartsAt.ToString("dd.MM.yyyy") + ")";
+                  if (isSelected)
+                  {
+                      <option value="@ev.Id" selected>@evLabel</option>
+                  }
+                  else
+                  {
+                      <option value="@ev.Id">@evLabel</option>
+                  }
+              }
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Titel *</label>
+            <input type="text" name="Title" class="form-control" required value="@Model.Title">
+          </div>
+          <div class="row">
+            <div class="col-md-6 mb-3">
+              <label class="form-label">Start *</label>
+              <input type="datetime-local" name="StartsAt" class="form-control" required value="@startValue">
+            </div>
+            <div class="col-md-6 mb-3">
+              <label class="form-label">Ende *</label>
+              <input type="datetime-local" name="EndsAt" class="form-control" required value="@endValue">
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Beschreibung</label>
+            <div id="descriptionEditor" class="bg-white">@Html.Raw(Model.Description)</div>
+            <input type="hidden" name="Description" id="DescriptionInput">
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Maximale Anzahl Personen für diesen Task *</label>
+            <input type="number" min="1" name="MaxAssignees" class="form-control" style="max-width:150px" value="@Model.MaxAssignees" required>
+            <div class="form-text">Steuert, wie viele Helfer:innen sich maximal eintragen können.</div>
+          </div>
+          <button type="submit" class="btn btn-primary" @(events.Any() ? "" : "disabled")>@(isEdit ? "Speichern" : "Task anlegen")</button>
+          <a href="@cancelUrl" class="btn btn-outline-secondary">Abbrechen</a>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+@section Styles {
+  <link href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css" rel="stylesheet">
+  <style>
+    #descriptionEditor .ql-editor { min-height: 180px; }
+  </style>
+}
+
+@section Scripts {
+  <script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
+  <script>
+    var descriptionQuill = new Quill('#descriptionEditor', { theme: 'snow' });
+    document.getElementById('taskForm').addEventListener('submit', function () {
+      document.getElementById('DescriptionInput').value = descriptionQuill.root.innerHTML;
+    });
+  </script>
+}

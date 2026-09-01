@@ -1,0 +1,89 @@
+@model HelferApp.Services.EmailOptions
+
+@{
+    ViewData["Title"] = "Einstellungen";
+}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <div>
+        <h2 class="mb-1">Einstellungen</h2>
+        <p class="text-muted mb-0">Systemdienste direkt in der Anwendung konfigurieren.</p>
+    </div>
+    <a class="btn btn-outline-secondary" href="/Admin/Users">Zur Benutzerverwaltung</a>
+</div>
+
+@if (TempData["Success"] is string success)
+{
+    <div class="alert alert-success">@success</div>
+}
+
+@if (!ViewData.ModelState.IsValid)
+{
+    <div class="alert alert-danger">
+        Bitte prüfe die markierten Felder und speichere erneut.
+    </div>
+}
+
+<div class="card shadow-sm">
+    <div class="card-body">
+        <h4 class="card-title mb-3">Mailservice</h4>
+
+        <form method="post">
+            @Html.AntiForgeryToken()
+
+            <div class="form-check form-switch mb-4">
+                <input asp-for="Enabled" class="form-check-input" />
+                <label asp-for="Enabled" class="form-check-label"></label>
+                <div class="form-text">Wenn deaktiviert, werden E-Mails nur ins Log geschrieben.</div>
+            </div>
+
+            <div class="row g-3">
+                <div class="col-md-8">
+                    <label asp-for="SmtpHost" class="form-label"></label>
+                    <input asp-for="SmtpHost" class="form-control" placeholder="smtp.example.com" />
+                    <span asp-validation-for="SmtpHost" class="text-danger"></span>
+                </div>
+                <div class="col-md-4">
+                    <label asp-for="SmtpPort" class="form-label"></label>
+                    <input asp-for="SmtpPort" class="form-control" />
+                    <span asp-validation-for="SmtpPort" class="text-danger"></span>
+                </div>
+
+                <div class="col-md-6">
+                    <label asp-for="SmtpUser" class="form-label"></label>
+                    <input asp-for="SmtpUser" class="form-control" autocomplete="username" />
+                    <span asp-validation-for="SmtpUser" class="text-danger"></span>
+                </div>
+                <div class="col-md-6">
+                    <label asp-for="SmtpPassword" class="form-label"></label>
+                    <input asp-for="SmtpPassword" class="form-control" autocomplete="new-password" />
+                    <span asp-validation-for="SmtpPassword" class="text-danger"></span>
+                </div>
+
+                <div class="col-md-6">
+                    <label asp-for="FromAddress" class="form-label"></label>
+                    <input asp-for="FromAddress" class="form-control" placeholder="no-reply@example.com" />
+                    <span asp-validation-for="FromAddress" class="text-danger"></span>
+                </div>
+                <div class="col-md-6">
+                    <label asp-for="FromName" class="form-label"></label>
+                    <input asp-for="FromName" class="form-control" placeholder="Helfer-Tasks" />
+                    <span asp-validation-for="FromName" class="text-danger"></span>
+                </div>
+
+                <div class="col-12">
+                    <div class="form-check">
+                        <input asp-for="EnableSsl" class="form-check-input" />
+                        <label asp-for="EnableSsl" class="form-check-label"></label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mt-4 d-flex gap-2">
+                <button type="submit" class="btn btn-primary">Speichern</button>
+                <a href="/Tasks" class="btn btn-outline-secondary">Abbrechen</a>
+            </div>
+        </form>
+    </div>
+</div>
+

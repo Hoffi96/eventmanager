@@ -1,0 +1,92 @@
+@model List<HelferApp.Models.User>
+@{
+    ViewData["Title"] = "Nutzerverwaltung";
+    var events = ViewBag.Events as List<HelferApp.Models.Event> ?? new();
+}
+
+<h2 class="mb-3">Nutzerverwaltung</h2>
+
+<div class="card shadow-sm mb-4">
+    <div class="card-body">
+        <div class="table-responsive">
+            <table class="table align-middle">
+                <thead>
+                    <tr>
+                        <th>Benutzer</th>
+                        <th>E-Mail</th>
+                        <th>Rollen</th>
+                        <th>Koordinierte Events</th>
+                        <th>Aktionen</th>
+                    </tr>
+                </thead>
+                <tbody>
+                @foreach (var user in Model)
+                {
+                    <tr>
+                        <td>@user.Username</td>
+                        <td>@user.Email</td>
+                        <td>
+                            @if (user.IsAdmin)
+                            {
+                                <span class="badge bg-danger">Admin</span>
+                            }
+                            @if (user.IsEventCoordinator)
+                            {
+                                <span class="badge bg-primary">Koordination</span>
+                            }
+                            @if (!user.IsAdmin && !user.IsEventCoordinator)
+                            {
+                                <span class="text-muted">Standard</span>
+                            }
+                        </td>
+                        <td>
+                            @if (user.CoordinatedEvents.Any())
+                            {
+                                <div class="d-flex gap-1 flex-wrap">
+                                    @foreach (var c in user.CoordinatedEvents.OrderBy(x => x.Event.StartsAt))
+                                    {
+                                        <form method="post" action="/Admin/RemoveCoordinator" class="d-inline">
+                                            @Html.AntiForgeryToken()
+                                            <input type="hidden" name="userId" value="@user.Id" />
+                                            <input type="hidden" name="eventId" value="@c.EventId" />
+                                            <button class="btn btn-sm btn-outline-secondary" type="submit">@c.Event.Name ✕</button>
+                                        </form>
+                                    }
+                                </div>
+                            }
+                            else
+                            {
+                                <span class="text-muted">Keine</span>
+                            }
+                        </td>
+                        <td>
+                            <div class="d-flex gap-2 flex-wrap">
+                                <form method="post" action="/Admin/ToggleAdmin" class="d-inline">
+                                    @Html.AntiForgeryToken()
+                                    <input type="hidden" name="userId" value="@user.Id" />
+                                    <button class="btn btn-sm @(user.IsAdmin ? "btn-outline-danger" : "btn-outline-success")" type="submit">
+                                        @(user.IsAdmin ? "Admin entfernen" : "Zu Admin machen")
+                                    </button>
+                                </form>
+
+                                <form method="post" action="/Admin/AssignCoordinator" class="d-inline-flex gap-2 align-items-center">
+                                    @Html.AntiForgeryToken()
+                                    <input type="hidden" name="userId" value="@user.Id" />
+                                    <select class="form-select form-select-sm" name="eventId" required>
+                                        <option value="">Event wählen</option>
+                                        @foreach (var ev in events)
+                                        {
+                                            <option value="@ev.Id">@ev.Name (@ev.StartsAt.ToString("dd.MM.yyyy"))</option>
+                                        }
+                                    </select>
+                                    <button class="btn btn-sm btn-outline-primary" type="submit">Als Koordination zuweisen</button>
+                                </form>
+                            </div>
+                        </td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>

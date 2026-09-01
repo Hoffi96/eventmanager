@@ -1,0 +1,63 @@
+@model Event
+@{
+    var isEdit = Model.Id != 0;
+    ViewData["Title"] = isEdit ? "Veranstaltung bearbeiten" : "Neue Veranstaltung";
+    var formAction = isEdit ? $"/Events/Edit/{Model.Id}" : "/Events/New";
+    var cancelUrl = isEdit ? $"/Events/Details/{Model.Id}" : "/Events";
+    var startValue = Model.StartsAt == default ? "" : Model.StartsAt.ToString("yyyy-MM-ddTHH:mm");
+    var endValue = Model.EndsAt == default ? "" : Model.EndsAt.ToString("yyyy-MM-ddTHH:mm");
+}
+<div class="row justify-content-center">
+  <div class="col-md-7">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="mb-3">@(isEdit ? "Veranstaltung bearbeiten" : "Neue Veranstaltung")</h4>
+        <form method="post" action="@formAction" id="eventForm">
+          @Html.AntiForgeryToken()
+          <div class="mb-3">
+            <label class="form-label">Name *</label>
+            <input type="text" name="Name" class="form-control" required value="@Model.Name" placeholder="z. B. Sommerfest 2026">
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Ort</label>
+            <input type="text" name="Location" class="form-control" value="@Model.Location" placeholder="z. B. Stadtpark">
+          </div>
+          <div class="row">
+            <div class="col-md-6 mb-3">
+              <label class="form-label">Start *</label>
+              <input type="datetime-local" name="StartsAt" class="form-control" required value="@startValue">
+            </div>
+            <div class="col-md-6 mb-3">
+              <label class="form-label">Ende *</label>
+              <input type="datetime-local" name="EndsAt" class="form-control" required value="@endValue">
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Beschreibung <span class="text-muted small">(für alle Helfer:innen sichtbar)</span></label>
+            <div id="descriptionEditor" class="bg-white">@Html.Raw(Model.Description)</div>
+            <input type="hidden" name="Description" id="DescriptionInput">
+          </div>
+          <button type="submit" class="btn btn-primary">@(isEdit ? "Speichern" : "Veranstaltung anlegen")</button>
+          <a href="@cancelUrl" class="btn btn-outline-secondary">Abbrechen</a>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+@section Styles {
+  <link href="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.snow.css" rel="stylesheet">
+  <style>
+    #descriptionEditor .ql-editor { min-height: 180px; }
+  </style>
+}
+
+@section Scripts {
+  <script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
+  <script>
+    var descriptionQuill = new Quill('#descriptionEditor', { theme: 'snow' });
+    document.getElementById('eventForm').addEventListener('submit', function () {
+      document.getElementById('DescriptionInput').value = descriptionQuill.root.innerHTML;
+    });
+  </script>
+}

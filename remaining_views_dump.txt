@@ -1,0 +1,911 @@
+===== Controllers/AuthorizedControllerBase.cs =====
+using System.Security.Claims;
+using HelferApp.Data;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+
+namespace HelferApp.Controllers;
+
+[Authorize]
+public abstract class AuthorizedControllerBase : Controller
+{
+    protected readonly AppDbContext Db;
+
+    protected AuthorizedControllerBase(AppDbContext db)
+    {
+        Db = db;
+    }
+
+    protected int CurrentUserId =>
+        int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
+
+    protected bool IsAdmin => User.IsInRole("Admin");
+}
+
+===== Views/Shared/_Layout.cshtml =====
+<!doctype html>
+<html lang="de">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>@ViewData["Title"] - Helfer-Tasks</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <style>
+        body { background:#f6f7f9; }
+        .navbar-brand { font-weight: 600; }
+        .badge-slots-free { font-size: .85rem; }
+        .card-task { transition: box-shadow .15s; }
+        .card-task:hover { box-shadow: 0 .25rem .75rem rgba(0,0,0,.08); }
+    </style>
+    @await RenderSectionAsync("Styles", required: false)
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
+    <div class="container">
+        <a class="navbar-brand" href="/">🎪 Helfer-Tasks</a>
+        <div class="d-flex gap-2 align-items-center">
+            @if (User.Identity != null && User.Identity.IsAuthenticated)
+            {
+                var adminSuffix = User.IsInRole("Admin") ? " (Admin)" : "";
+                <a href="/Events" class="btn btn-sm btn-outline-light">Veranstaltungen</a>
+                <a href="/Tasks/Schedule" class="btn btn-sm btn-outline-light">Zeitplan</a>
+                if (User.IsInRole("Admin"))
+                {
+                    <a href="/Tasks/New" class="btn btn-sm btn-success">+ Task anlegen</a>
+                    <a href="/Admin/Settings" class="btn btn-sm btn-outline-light">Einstellungen</a>
+                }
+                <span class="text-light small">
+                    Eingeloggt als <strong>@User.Identity.Name</strong>@adminSuffix
+                </span>
+                <a href="/Account/ChangePassword" class="btn btn-sm btn-outline-light">Passwort ändern</a>
+                <form method="post" action="/Account/Logout" class="d-inline m-0">
+                    @Html.AntiForgeryToken()
+                    <button type="submit" class="btn btn-sm btn-outline-light">Logout</button>
+                </form>
+            }
+            else
+            {
+                <a href="/Account/Login" class="btn btn-sm btn-outline-light">Login</a>
+                <a href="/Account/Register" class="btn btn-sm btn-light">Registrieren</a>
+            }
+        </div>
+    </div>
+</nav>
+
+<div class="container pb-5">
+    @if (TempData["Success"] != null)
+    {
+        <div class="alert alert-success alert-dismissible fade show" role="alert">
+            @TempData["Success"]
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+    }
+    @if (TempData["Error"] != null)
+    {
+        <div class="alert alert-danger alert-dismissible fade show" role="alert">
+            @TempData["Error"]
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+    }
+    @if (TempData["Info"] != null)
+    {
+        <div class="alert alert-info alert-dismissible fade show" role="alert">
+            @TempData["Info"]
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+    }
+    @if (TempData["Warning"] != null)
+    {
+        <div class="alert alert-warning alert-dismissible fade show" role="alert">
+            @TempData["Warning"]
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+    }
+
+    @RenderBody()
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+@await RenderSectionAsync("Scripts", required: false)
+</body>
+</html>
+
+===== Views/Tasks/Details.cshtml =====
+@model TaskDetailVm
+@{
+    ViewData["Title"] = Model.Task.Title;
+    var timeRange = Model.Task.StartsAt.ToString("dd.MM.yyyy HH:mm") + " - " + Model.Task.EndsAt.ToString("dd.MM.yyyy HH:mm");
+    var assignmentSummary = Model.Assignments.Count + " / " + Model.Task.MaxAssignees;
+    var currentUid = int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
+}
+<div class="d-flex justify-content-between align-items-start mb-3">
+  <div>
+    <h3 class="mb-1">@Model.Task.Title</h3>
+    <div class="text-muted">
+        Veranstaltung: <a href="/Events/Details/@Model.Task.EventId">@Model.Task.Event.Name</a>
+    </div>
+    <div class="text-muted small">@timeRange</div>
+  </div>
+  @if (User.IsInRole("Admin"))
+  {
+    <div class="d-flex gap-2">
+      <a href="/Tasks/Edit/@Model.Task.Id" class="btn btn-sm btn-outline-secondary">Bearbeiten</a>
+      <form method="post" action="/Tasks/Delete/@Model.Task.Id" onsubmit="return confirm('Task wirklich löschen?');">
+        @Html.AntiForgeryToken()
+        <button type="submit" class="btn btn-sm btn-outline-danger">Löschen</button>
+      </form>
+    </div>
+  }
+</div>
+
+<div class="row g-4">
+  <div class="col-lg-8">
+    <div class="card shadow-sm mb-4">
+      <div class="card-body">
+        <h6 class="text-muted">Beschreibung</h6>
+        @if (string.IsNullOrEmpty(Model.Task.Description))
+        {
+            <p class="text-muted mb-0">Keine Beschreibung hinterlegt.</p>
+        }
+        else
+        {
+            <div>@Html.Raw(Model.Task.Description)</div>
+        }
+      </div>
+    </div>
+
+    <div class="card shadow-sm mb-4">
+      <div class="card-body">
+        <h6 class="text-muted mb-3">Anhänge</h6>
+        @if (Model.Attachments.Any())
+        {
+          <ul class="list-group mb-3">
+          @foreach (var a in Model.Attachments)
+          {
+            <li class="list-group-item d-flex justify-content-between align-items-center">
+              <a href="/Tasks/Download/@a.Id">@a.OriginalName</a>
+              <span class="text-muted small">von @a.UploadedBy.Username</span>
+            </li>
+          }
+          </ul>
+        }
+        else
+        {
+          <p class="text-muted small">Noch keine Anhänge.</p>
+        }
+        <form method="post" action="/Tasks/Attachment/@Model.Task.Id" enctype="multipart/form-data" class="d-flex gap-2">
+          @Html.AntiForgeryToken()
+          <input type="file" name="file" class="form-control form-control-sm" required>
+          <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap">Hochladen</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h6 class="text-muted mb-3">Kommentare</h6>
+        @if (Model.Comments.Any())
+        {
+          foreach (var c in Model.Comments)
+          {
+            <div class="border-bottom pb-2 mb-2">
+              <div class="small">
+                <strong>@c.User.Username</strong>
+                <span class="text-muted">@c.CreatedAt.ToString("yyyy-MM-dd HH:mm")</span>
+              </div>
+              <div style="white-space: pre-wrap;">@c.Body</div>
+            </div>
+          }
+        }
+        else
+        {
+          <p class="text-muted small">Noch keine Kommentare.</p>
+        }
+        <form method="post" action="/Tasks/Comment/@Model.Task.Id" class="mt-3">
+          @Html.AntiForgeryToken()
+          <textarea name="body" class="form-control mb-2" rows="2" placeholder="Kommentar schreiben…" required></textarea>
+          <button type="submit" class="btn btn-sm btn-primary">Kommentieren</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-4">
+    <div class="card shadow-sm mb-4">
+      <div class="card-body">
+        <h6 class="text-muted mb-2">Zuordnung (@assignmentSummary)</h6>
+        <ul class="list-group mb-3">
+        @if (Model.Assignments.Any())
+        {
+          foreach (var a in Model.Assignments)
+          {
+            <li class="list-group-item d-flex justify-content-between align-items-center">
+              <span>
+                @a.User.Username
+                @if (a.AssignedByAdmin)
+                {
+                    <span class="badge bg-light text-dark border">admin</span>
+                }
+              </span>
+              @if (a.UserId == currentUid || User.IsInRole("Admin"))
+              {
+                <form method="post" action="/Tasks/Unassign/@Model.Task.Id">
+                  @Html.AntiForgeryToken()
+                  <input type="hidden" name="userId" value="@a.UserId" />
+                  <button type="submit" class="btn btn-sm btn-outline-danger">entfernen</button>
+                </form>
+              }
+            </li>
+          }
+        }
+        else
+        {
+          <li class="list-group-item text-muted">Noch niemand zugeordnet.</li>
+        }
+        </ul>
+
+        @if (Model.IsAssigned)
+        {
+          <div class="alert alert-success py-2 small mb-0">Du bist diesem Task zugeordnet.</div>
+        }
+        else if (Model.SlotsFree > 0)
+        {
+          <form method="post" action="/Tasks/Assign/@Model.Task.Id">
+            @Html.AntiForgeryToken()
+            <button type="submit" class="btn btn-primary w-100">Für diesen Task eintragen</button>
+          </form>
+        }
+        else if (Model.IsOnWaitlist)
+        {
+          <div class="alert alert-secondary py-2 small mb-2">Alle Plätze belegt — du stehst auf der Warteliste.</div>
+          <form method="post" action="/Tasks/LeaveWaitlist/@Model.Task.Id">
+            @Html.AntiForgeryToken()
+            <button type="submit" class="btn btn-sm btn-outline-secondary w-100">Von Warteliste entfernen</button>
+          </form>
+        }
+        else
+        {
+          <div class="alert alert-secondary py-2 small mb-2">Alle Plätze belegt.</div>
+          <form method="post" action="/Tasks/JoinWaitlist/@Model.Task.Id">
+            @Html.AntiForgeryToken()
+            <button type="submit" class="btn btn-outline-primary w-100">Auf Warteliste setzen</button>
+          </form>
+        }
+      </div>
+    </div>
+
+    <div class="card shadow-sm mb-4">
+      <div class="card-body">
+        <h6 class="text-muted mb-2">Warteliste (@Model.Waitlist.Count)</h6>
+        @if (Model.Waitlist.Any())
+        {
+          <ol class="list-group list-group-numbered mb-0">
+          @foreach (var w in Model.Waitlist)
+          {
+            <li class="list-group-item d-flex justify-content-between align-items-center">
+              <span>@w.User.Username</span>
+              @if (w.UserId == currentUid || User.IsInRole("Admin"))
+              {
+                <form method="post" action="/Tasks/LeaveWaitlist/@Model.Task.Id">
+                  @Html.AntiForgeryToken()
+                  <input type="hidden" name="userId" value="@w.UserId" />
+                  <button type="submit" class="btn btn-sm btn-outline-danger">entfernen</button>
+                </form>
+              }
+            </li>
+          }
+          </ol>
+        }
+        else
+        {
+          <p class="text-muted small mb-0">Niemand auf der Warteliste.</p>
+        }
+      </div>
+    </div>
+
+    @if (User.IsInRole("Admin"))
+    {
+      <div class="card shadow-sm">
+        <div class="card-body">
+          <h6 class="text-muted mb-2">Admin: Person zuordnen</h6>
+          <form method="post" action="/Tasks/AdminAssign/@Model.Task.Id" class="d-flex gap-2">
+            @Html.AntiForgeryToken()
+            <select name="userId" class="form-select form-select-sm">
+            @foreach (var u in Model.AllUsers)
+            {
+              <option value="@u.Id">@u.Username</option>
+            }
+            </select>
+            <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap">Zuordnen</button>
+          </form>
+          <p class="small text-muted mt-2 mb-0">Max. Personen für diesen Task lässt sich unter „Bearbeiten“ ändern.</p>
+        </div>
+      </div>
+    }
+  </div>
+</div>
+
+<a href="/Tasks" class="d-inline-block mt-4">&larr; zurück zur Übersicht</a>
+
+===== Views/Tasks/Index.cshtml =====
+@model List<TaskListItemVm>
+
+@{
+    ViewData["Title"] = "Aufgaben-Übersicht";
+}
+
+<h3 class="mb-4">Offene und laufende Tasks</h3>
+
+@if (!Model.Any())
+{
+    <p class="text-muted">
+        Noch keine Tasks angelegt.
+        @if (User.IsInRole("Admin"))
+        {
+            <a href="/Tasks/New">Jetzt ersten Task anlegen</a>
+        }
+    </p>
+}
+else
+{
+    <div class="row g-3">
+        @foreach (var item in Model)
+        {
+            <div class="col-md-6 col-lg-4">
+                <div class="card card-task h-100 shadow-sm">
+                    <div class="card-body d-flex flex-column">
+                        <div class="d-flex justify-content-between align-items-start mb-2">
+                            <h5 class="card-title mb-0">@item.Task.Title</h5>
+
+                            @if (item.SlotsFree > 0)
+                            {
+                                <span class="badge bg-success badge-slots-free">@item.SlotsFree frei</span>
+                            }
+                            else
+                            {
+                                <span class="badge bg-secondary badge-slots-free">voll</span>
+                            }
+                        </div>
+
+                        <div class="small mb-1">
+                            <a href="/Events/Details/@item.Task.EventId">@item.Task.Event.Name</a>
+                        </div>
+
+                        <div class="small text-muted mb-2">
+                            @(item.Task.StartsAt.ToString("dd.MM.yyyy HH:mm") + " - " + item.Task.EndsAt.ToString("dd.MM.yyyy HH:mm"))
+                        </div>
+
+                        <p class="card-text text-muted small flex-grow-1">
+                            @item.Task.Description
+                        </p>
+
+                        <div class="mb-2 small">
+                            <strong>Zugeordnet (@item.Assignees.Count / @item.Task.MaxAssignees):</strong>
+                            @(item.Assignees.Any() ? string.Join(", ", item.Assignees.Select(a => a.Username)) : "niemand")
+                        </div>
+
+                        <div class="d-flex gap-2">
+                            <a href="/Tasks/Details/@item.Task.Id" class="btn btn-sm btn-outline-primary flex-grow-1">Details</a>
+
+                            @if (item.IsAssigned)
+                            {
+                                <span class="btn btn-sm btn-outline-success disabled flex-grow-1">dabei</span>
+                            }
+                            else if (item.SlotsFree > 0)
+                            {
+                                <form method="post" action="/Tasks/Assign/@item.Task.Id" class="flex-grow-1">
+                                    @Html.AntiForgeryToken()
+                                    <button type="submit" class="btn btn-sm btn-primary w-100">Eintragen</button>
+                                </form>
+                            }
+                            else if (item.IsOnWaitlist)
+                            {
+                                <span class="btn btn-sm btn-outline-secondary disabled flex-grow-1">auf Warteliste</span>
+                            }
+                            else
+                            {
+                                <form method="post" action="/Tasks/JoinWaitlist/@item.Task.Id" class="flex-grow-1">
+                                    @Html.AntiForgeryToken()
+                                    <button type="submit" class="btn btn-sm btn-outline-primary w-100">Warteliste</button>
+                                </form>
+                            }
+                        </div>
+                    </div>
+                </div>
+            </div>
+        }
+    </div>
+}
+
+===== Views/Tasks/Schedule.cshtml =====
+@model List<ScheduleDayVm>
+@{
+    ViewData["Title"] = "Zeitplan";
+    var culture = new System.Globalization.CultureInfo("de-DE");
+}
+<h3 class="mb-4">Zeitplan</h3>
+
+@if (!Model.Any())
+{
+    <p class="text-muted">Noch keine Tasks angelegt.</p>
+}
+
+@foreach (var day in Model)
+{
+    var dayLabel = day.Date.ToString("dddd, dd.MM.yyyy", culture);
+    <h5 class="mt-4 mb-2">@dayLabel</h5>
+    <div class="list-group mb-2">
+    @foreach (var item in day.Items)
+    {
+        var t = item.Task;
+        var timeLabel = t.StartsAt.ToString("HH:mm") + " - " + t.EndsAt.ToString("HH:mm");
+        var slotsLabel = item.Assignees.Count + "/" + t.MaxAssignees;
+        <a href="/Tasks/Details/@t.Id" class="list-group-item list-group-item-action">
+          <div class="d-flex justify-content-between align-items-start">
+            <div>
+              <strong>@timeLabel</strong> &middot; @t.Title
+              <div class="small text-muted">@t.Event.Name &middot; @slotsLabel zugeordnet</div>
+            </div>
+            @if (item.SlotsFree > 0)
+            {
+                <span class="badge bg-success">@item.SlotsFree frei</span>
+            }
+            else
+            {
+                <span class="badge bg-secondary">voll</span>
+            }
+          </div>
+        </a>
+    }
+    </div>
+}
+
+===== Views/Events/Details.cshtml =====
+@model Event
+@{
+    ViewData["Title"] = Model.Name;
+    var range = Model.StartsAt.ToString("dd.MM.yyyy HH:mm") + " - " + Model.EndsAt.ToString("dd.MM.yyyy HH:mm");
+    var hasDescription = !string.IsNullOrEmpty(Model.Description);
+}
+<div class="d-flex justify-content-between align-items-start mb-3">
+  <div>
+    <h3 class="mb-1">@Model.Name</h3>
+    <div class="text-muted">@range</div>
+    @if (!string.IsNullOrEmpty(Model.Location))
+    {
+        <div class="text-muted small">@Model.Location</div>
+    }
+  </div>
+  @if (User.IsInRole("Admin"))
+  {
+    <div class="d-flex gap-2">
+      <a href="/Tasks/New?eventId=@Model.Id" class="btn btn-sm btn-success">+ Task für diese Veranstaltung</a>
+      <a href="/Events/CopyTasks/@Model.Id" class="btn btn-sm btn-outline-success">Tasks übernehmen</a>
+      <a href="/Events/Edit/@Model.Id" class="btn btn-sm btn-outline-secondary">Bearbeiten</a>
+      <form method="post" action="/Events/Delete/@Model.Id" onsubmit="return confirm('Veranstaltung wirklich löschen?');">
+        @Html.AntiForgeryToken()
+        <button type="submit" class="btn btn-sm btn-outline-danger">Löschen</button>
+      </form>
+    </div>
+  }
+</div>
+
+@* Allgemeine Infos zuerst: Beschreibung + Anhänge, damit sie sofort ins Auge fallen *@
+<div class="card shadow-sm mb-4">
+  <div class="card-body">
+    <h6 class="text-muted mb-2">Informationen zur Veranstaltung</h6>
+    @if (hasDescription)
+    {
+        <div class="mb-3">@Html.Raw(Model.Description)</div>
+    }
+    else
+    {
+        <p class="text-muted small mb-3">Keine Beschreibung hinterlegt.</p>
+    }
+
+    <h6 class="text-muted mb-2 mt-3">Anhänge</h6>
+    @if (Model.Attachments.Any())
+    {
+      <ul class="list-group mb-3">
+      @foreach (var a in Model.Attachments.OrderByDescending(a => a.CreatedAt))
+      {
+        <li class="list-group-item d-flex justify-content-between align-items-center">
+          <a href="/Events/Download/@a.Id">@a.OriginalName</a>
+          <span class="text-muted small">von @a.UploadedBy.Username</span>
+        </li>
+      }
+      </ul>
+    }
+    else
+    {
+      <p class="text-muted small">Noch keine Anhänge.</p>
+    }
+    <form method="post" action="/Events/Attachment/@Model.Id" enctype="multipart/form-data" class="d-flex gap-2">
+      @Html.AntiForgeryToken()
+      <input type="file" name="file" class="form-control form-control-sm" required>
+      <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap">Hochladen</button>
+    </form>
+  </div>
+</div>
+
+<h5 class="mb-3">Tasks dieser Veranstaltung</h5>
+
+@if (!Model.Tasks.Any())
+{
+    <p class="text-muted">Für diese Veranstaltung sind noch keine Tasks angelegt.</p>
+}
+
+<div class="row g-3">
+@foreach (var t in Model.Tasks.OrderBy(t => t.StartsAt))
+{
+    var slotsFree = t.MaxAssignees - t.Assignments.Count;
+    var taskRange = t.StartsAt.ToString("dd.MM.yyyy HH:mm") + " - " + t.EndsAt.ToString("dd.MM.yyyy HH:mm");
+    <div class="col-md-6 col-lg-4">
+      <div class="card h-100 shadow-sm">
+        <div class="card-body d-flex flex-column">
+          <div class="d-flex justify-content-between align-items-start mb-2">
+            <h6 class="card-title mb-0">@t.Title</h6>
+            @if (slotsFree > 0)
+            {
+                <span class="badge bg-success">@slotsFree frei</span>
+            }
+            else
+            {
+                <span class="badge bg-secondary">voll</span>
+            }
+          </div>
+          <div class="small text-muted mb-2">@taskRange</div>
+          <a href="/Tasks/Details/@t.Id" class="btn btn-sm btn-outline-primary mt-auto">Details</a>
+        </div>
+      </div>
+    </div>
+}
+</div>
+
+<a href="/Events" class="d-inline-block mt-4">&larr; zurück zur Übersicht</a>
+
+===== Views/Events/Index.cshtml =====
+@model List<Event>
+@{
+    ViewData["Title"] = "Veranstaltungen";
+}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h3 class="mb-0">Veranstaltungen</h3>
+  @if (User.IsInRole("Admin"))
+  {
+      <a href="/Events/New" class="btn btn-sm btn-success">+ Veranstaltung anlegen</a>
+  }
+</div>
+
+@if (!Model.Any())
+{
+    <p class="text-muted">Noch keine Veranstaltungen angelegt.</p>
+}
+
+<div class="row g-3">
+@foreach (var ev in Model)
+{
+    var range = ev.StartsAt.ToString("dd.MM.yyyy HH:mm") + " - " + ev.EndsAt.ToString("dd.MM.yyyy HH:mm");
+    <div class="col-md-6 col-lg-4">
+      <div class="card h-100 shadow-sm">
+        <div class="card-body d-flex flex-column">
+          <h5 class="card-title">@ev.Name</h5>
+          <div class="small text-muted mb-1">@range</div>
+          @if (!string.IsNullOrEmpty(ev.Location))
+          {
+              <div class="small text-muted mb-2">@ev.Location</div>
+          }
+          <div class="small mb-3 flex-grow-1">@ev.Tasks.Count Task(s)</div>
+          <a href="/Events/Details/@ev.Id" class="btn btn-sm btn-outline-primary">Details</a>
+        </div>
+      </div>
+    </div>
+}
+</div>
+
+===== Views/Admin/Users.cshtml =====
+@model List<User>
+@{
+    ViewData["Title"] = "Nutzerverwaltung";
+}
+<h3 class="mb-4">Nutzerverwaltung</h3>
+<table class="table bg-white shadow-sm">
+  <thead>
+    <tr><th>Benutzername</th><th>Rolle</th><th>Registriert am</th><th></th></tr>
+  </thead>
+  <tbody>
+  @foreach (var u in Model)
+  {
+    <tr>
+      <td>@u.Username</td>
+      <td>
+        @if (u.IsAdmin)
+        {
+          <span class="badge bg-primary">Admin</span>
+        }
+        else
+        {
+          <span class="badge bg-secondary">Helfer:in</span>
+        }
+      </td>
+      <td class="text-muted small">@u.CreatedAt.ToString("yyyy-MM-dd HH:mm")</td>
+      <td class="text-end">
+        <form method="post" action="/Admin/ToggleAdmin">
+          @Html.AntiForgeryToken()
+          <input type="hidden" name="userId" value="@u.Id" />
+          @{
+              var isSelf = u.Id == int.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
+          }
+          @if (isSelf)
+          {
+              <button type="submit" class="btn btn-sm btn-outline-secondary" disabled>
+                @(u.IsAdmin ? "Admin entziehen" : "Zu Admin machen")
+              </button>
+          }
+          else
+          {
+              <button type="submit" class="btn btn-sm btn-outline-secondary">
+                @(u.IsAdmin ? "Admin entziehen" : "Zu Admin machen")
+              </button>
+          }
+        </form>
+      </td>
+    </tr>
+  }
+  </tbody>
+</table>
+<a href="/Tasks">&larr; zurück zur Übersicht</a>
+
+===== Views/Admin/Settings.cshtml =====
+@model HelferApp.Services.EmailOptions
+
+@{
+    ViewData["Title"] = "Einstellungen";
+}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <div>
+        <h2 class="mb-1">Einstellungen</h2>
+        <p class="text-muted mb-0">Systemdienste direkt in der Anwendung konfigurieren.</p>
+    </div>
+    <a class="btn btn-outline-secondary" href="/Admin/Users">Zur Benutzerverwaltung</a>
+</div>
+
+@if (TempData["Success"] is string success)
+{
+    <div class="alert alert-success">@success</div>
+}
+
+@if (!ViewData.ModelState.IsValid)
+{
+    <div class="alert alert-danger">
+        Bitte prüfe die markierten Felder und speichere erneut.
+    </div>
+}
+
+<div class="card shadow-sm">
+    <div class="card-body">
+        <h4 class="card-title mb-3">Mailservice</h4>
+
+        <form method="post">
+            @Html.AntiForgeryToken()
+
+            <div class="form-check form-switch mb-4">
+                <input asp-for="Enabled" class="form-check-input" />
+                <label asp-for="Enabled" class="form-check-label"></label>
+                <div class="form-text">Wenn deaktiviert, werden E-Mails nur ins Log geschrieben.</div>
+            </div>
+
+            <div class="row g-3">
+                <div class="col-md-8">
+                    <label asp-for="SmtpHost" class="form-label"></label>
+                    <input asp-for="SmtpHost" class="form-control" placeholder="smtp.example.com" />
+                    <span asp-validation-for="SmtpHost" class="text-danger"></span>
+                </div>
+                <div class="col-md-4">
+                    <label asp-for="SmtpPort" class="form-label"></label>
+                    <input asp-for="SmtpPort" class="form-control" />
+                    <span asp-validation-for="SmtpPort" class="text-danger"></span>
+                </div>
+
+                <div class="col-md-6">
+                    <label asp-for="SmtpUser" class="form-label"></label>
+                    <input asp-for="SmtpUser" class="form-control" autocomplete="username" />
+                    <span asp-validation-for="SmtpUser" class="text-danger"></span>
+                </div>
+                <div class="col-md-6">
+                    <label asp-for="SmtpPassword" class="form-label"></label>
+                    <input asp-for="SmtpPassword" class="form-control" autocomplete="new-password" />
+                    <span asp-validation-for="SmtpPassword" class="text-danger"></span>
+                </div>
+
+                <div class="col-md-6">
+                    <label asp-for="FromAddress" class="form-label"></label>
+                    <input asp-for="FromAddress" class="form-control" placeholder="no-reply@example.com" />
+                    <span asp-validation-for="FromAddress" class="text-danger"></span>
+                </div>
+                <div class="col-md-6">
+                    <label asp-for="FromName" class="form-label"></label>
+                    <input asp-for="FromName" class="form-control" placeholder="Helfer-Tasks" />
+                    <span asp-validation-for="FromName" class="text-danger"></span>
+                </div>
+
+                <div class="col-12">
+                    <div class="form-check">
+                        <input asp-for="EnableSsl" class="form-check-input" />
+                        <label asp-for="EnableSsl" class="form-check-label"></label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mt-4 d-flex gap-2">
+                <button type="submit" class="btn btn-primary">Speichern</button>
+                <a href="/Tasks" class="btn btn-outline-secondary">Abbrechen</a>
+            </div>
+        </form>
+    </div>
+</div>
+
+
+===== Services/IEmailService.cs =====
+namespace HelferApp.Services;
+
+public interface IEmailService
+{
+    Task SendAsync(string toAddress, string subject, string body);
+}
+
+===== Services/SmtpEmailService.cs =====
+using System.Net;
+using System.Net.Mail;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+
+namespace HelferApp.Services;
+
+/// <summary>
+/// Versendet E-Mails per SMTP, sofern in appsettings.json unter "Email"
+/// konfiguriert (Enabled = true + SmtpHost gesetzt). Andernfalls wird die
+/// Mail nur geloggt, damit die App auch ohne Mail-Setup lauffähig bleibt.
+/// </summary>
+public class SmtpEmailService : IEmailService
+{
+    private readonly EmailOptions _options;
+    private readonly ILogger<SmtpEmailService> _logger;
+
+    public SmtpEmailService(IOptions<EmailOptions> options, ILogger<SmtpEmailService> logger)
+    {
+        _options = options.Value;
+        _logger = logger;
+    }
+
+    public async Task SendAsync(string toAddress, string subject, string body)
+    {
+        if (string.IsNullOrWhiteSpace(toAddress))
+        {
+            return;
+        }
+
+        if (!_options.Enabled || string.IsNullOrWhiteSpace(_options.SmtpHost))
+        {
+            _logger.LogInformation(
+                "E-Mail nicht versendet (SMTP deaktiviert/nicht konfiguriert) an {To}: {Subject}\n{Body}",
+                toAddress, subject, body);
+            return;
+        }
+
+        using var message = new MailMessage
+        {
+            From = new MailAddress(_options.FromAddress, _options.FromName),
+            Subject = subject,
+            Body = body,
+            IsBodyHtml = false
+        };
+        message.To.Add(toAddress);
+
+        using var client = new SmtpClient(_options.SmtpHost, _options.SmtpPort)
+        {
+            EnableSsl = _options.EnableSsl,
+            Credentials = string.IsNullOrWhiteSpace(_options.SmtpUser)
+                ? CredentialCache.DefaultNetworkCredentials
+                : new NetworkCredential(_options.SmtpUser, _options.SmtpPassword)
+        };
+
+        try
+        {
+            await client.SendMailAsync(message);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "E-Mail-Versand an {To} fehlgeschlagen", toAddress);
+        }
+    }
+}
+
+===== Program.cs =====
+using HelferApp.Data;
+using HelferApp.Models;
+using HelferApp.Services;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.EntityFrameworkCore;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddControllersWithViews();
+
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseSqlite("Data Source=helferapp.db"));
+
+builder.Services.Configure<EmailOptions>(builder.Configuration.GetSection("Email"));
+builder.Services.AddSingleton<IEmailService, SmtpEmailService>();
+
+builder.Services
+    .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(options =>
+    {
+        options.LoginPath = "/Account/Login";
+        options.AccessDeniedPath = "/Account/Login";
+        options.ExpireTimeSpan = TimeSpan.FromDays(7);
+        options.SlidingExpiration = true;
+    });
+
+builder.Services.AddAuthorization();
+
+var app = builder.Build();
+
+// Ausstehende EF-Core-Migrationen anwenden (legt die DB beim allerersten Start
+// auch komplett neu an). Voraussetzung: mindestens eine Migration wurde per
+// "dotnet ef migrations add ..." erzeugt - siehe README.
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    db.Database.Migrate();
+
+    if (!db.Users.Any())
+    {
+        db.Users.Add(new User
+        {
+            Username = "admin",
+            Email = "admin@example.com",
+            PasswordHash = PasswordHelper.Hash("admin123"),
+            IsAdmin = true,
+            CreatedAt = DateTime.UtcNow
+        });
+        db.SaveChanges();
+
+        Console.WriteLine(new string('=', 60));
+        Console.WriteLine("Erststart: Admin-Account angelegt");
+        Console.WriteLine("  Benutzername: admin");
+        Console.WriteLine("  Passwort:     admin123");
+        Console.WriteLine("  E-Mail:       admin@example.com (bitte per Passwort-Reset anpassen)");
+        Console.WriteLine("  -> Bitte nach dem ersten Login das Passwort ändern!");
+        Console.WriteLine(new string('=', 60));
+    }
+}
+
+// Hinter einem Reverse Proxy (nginx/IIS) übernimmt diese Middleware
+// X-Forwarded-For/-Proto, damit Auth-Cookies, Redirects und Logging die
+// korrekte Original-Anfrage (https, echte Client-IP) sehen.
+app.UseForwardedHeaders(new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
+});
+
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHsts();
+}
+
+app.UseStaticFiles();
+app.UseRouting();
+
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapControllerRoute(
+    name: "default",
+    pattern: "{controller=Tasks}/{action=Index}/{id?}");
+
+app.Run();
+

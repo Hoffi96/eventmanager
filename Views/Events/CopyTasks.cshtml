@@ -1,0 +1,47 @@
+@model List<Event>
+@{
+    var target = ViewBag.Target as Event;
+    var targetId = target != null ? target.Id : 0;
+    var targetName = target != null ? target.Name : "";
+    ViewData["Title"] = "Tasks übernehmen";
+}
+<div class="row justify-content-center">
+  <div class="col-md-7">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="mb-1">Tasks übernehmen</h4>
+        <p class="text-muted small mb-3">
+            Für Veranstaltung <strong>@targetName</strong>. Titel, Beschreibung und Personenlimit
+            werden kopiert; Zeiten werden relativ zum Start der Quell-Veranstaltung übertragen.
+            Zuordnungen, Kommentare und Anhänge werden nicht mitkopiert.
+        </p>
+
+        @if (!Model.Any())
+        {
+            <p class="text-muted">Keine anderen Veranstaltungen mit Tasks gefunden.</p>
+            <a href="/Events/Details/@targetId" class="btn btn-outline-secondary">Zurück</a>
+        }
+        else
+        {
+            <form method="post" action="/Events/CopyTasks/@targetId">
+              @Html.AntiForgeryToken()
+              <div class="mb-3">
+                <label class="form-label">Von welcher Veranstaltung übernehmen?</label>
+                <select name="sourceEventId" class="form-select" required>
+                  <option value="">-- auswählen --</option>
+                  @foreach (var ev in Model)
+                  {
+                      var range = ev.StartsAt.ToString("dd.MM.yyyy");
+                      var label = ev.Name + " (" + range + ", " + ev.Tasks.Count + " Task(s))";
+                      <option value="@ev.Id">@label</option>
+                  }
+                </select>
+              </div>
+              <button type="submit" class="btn btn-primary">Tasks übernehmen</button>
+              <a href="/Events/Details/@targetId" class="btn btn-outline-secondary">Abbrechen</a>
+            </form>
+        }
+      </div>
+    </div>
+  </div>
+</div>

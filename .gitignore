@@ -1,0 +1,5 @@
+bin/
+obj/
+helferapp.db
+Uploads/*
+!Uploads/.gitkeep
