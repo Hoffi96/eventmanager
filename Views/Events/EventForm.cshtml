@@ -6,6 +6,8 @@
     var cancelUrl = isEdit ? $"/Events/Details/{Model.Id}" : "/Events";
     var startValue = Model.StartsAt == default ? "" : Model.StartsAt.ToString("yyyy-MM-ddTHH:mm");
     var endValue = Model.EndsAt == default ? "" : Model.EndsAt.ToString("yyyy-MM-ddTHH:mm");
+    var allUsers = ViewBag.AllUsers as List<HelferApp.Models.User> ?? new List<HelferApp.Models.User>();
+    var coordinatorIds = isEdit ? (ViewBag.CoordinatorIds as List<int> ?? new List<int>()) : new List<int>();
 }
 <div class="row justify-content-center">
   <div class="col-md-7">
@@ -33,9 +35,23 @@
             </div>
           </div>
           <div class="mb-3">
-            <label class="form-label">Beschreibung <span class="text-muted small">(für alle Helfer:innen sichtbar)</span></label>
+            <label class="form-label">Beschreibung <span class="text-muted small">(f\u00fcr alle Helfer:innen sichtbar)</span></label>
             <div id="descriptionEditor" class="bg-white">@Html.Raw(Model.Description)</div>
             <input type="hidden" name="Description" id="DescriptionInput">
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Hauptverantwortliche Helfer:innen</label>
+            <div class="border rounded p-3" style="max-height: 200px; overflow-y: auto;">
+              @foreach (var user in allUsers)
+              {
+                var isChecked = coordinatorIds.Contains(user.Id);
+                <div class="form-check">
+                  <input type="checkbox" name="coordinatorUserIds" value="@user.Id" class="form-check-input" id="coord_@user.Id" @(isChecked ? "checked" : "")>
+                  <label class="form-check-label" for="coord_@user.Id">@user.Username</label>
+                </div>
+              }
+            </div>
+            <div class="form-text">W\u00e4hle eine oder mehrere Personen aus, die f\u00fcr diese Veranstaltung verantwortlich sind.</div>
           </div>
           <button type="submit" class="btn btn-primary">@(isEdit ? "Speichern" : "Veranstaltung anlegen")</button>
           <a href="@cancelUrl" class="btn btn-outline-secondary">Abbrechen</a>

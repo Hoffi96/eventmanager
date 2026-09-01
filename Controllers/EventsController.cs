@@ -78,20 +78,21 @@ public class EventsController : AuthorizedControllerBase
 
     [Authorize(Roles = "Admin,EventCoordinator")]
     [HttpGet]
-    public IActionResult New()
+    public async Task<IActionResult> New()
     {
         if (!IsAdmin)
         {
             return Forbid();
         }
 
+        ViewBag.AllUsers = await Db.Users.OrderBy(u => u.Username).ToListAsync();
         return View("EventForm", new Event());
     }
 
     [Authorize(Roles = "Admin,EventCoordinator")]
     [HttpPost]
     [ValidateAntiForgeryToken]
-    public async Task<IActionResult> New(Event form)
+    public async Task<IActionResult> New(Event form, int[]? coordinatorUserIds)
     {
         if (!IsAdmin)
         {
@@ -102,6 +103,7 @@ public class EventsController : AuthorizedControllerBase
         if (error != null)
         {
             TempData["Error"] = error;
+            ViewBag.AllUsers = await Db.Users.OrderBy(u => u.Username).ToListAsync();
             return View("EventForm", form);
         }
 
@@ -118,6 +120,25 @@ public class EventsController : AuthorizedControllerBase
 
         Db.Events.Add(ev);
         await Db.SaveChangesAsync();
+
+        if (coordinatorUserIds != null && coordinatorUserIds.Length > 0)
+        {
+            foreach (var userId in coordinatorUserIds)
+            {
+                var user = await Db.Users.FindAsync(userId);
+                if (user != null)
+                {
+                    user.IsEventCoordinator = true;
+                    Db.EventCoordinatorAssignments.Add(new EventCoordinatorAssignment
+                    {
+                        UserId = userId,
+                        EventId = ev.Id,
+                        AssignedAt = DateTime.UtcNow
+                    });
+                }
+            }
+            await Db.SaveChangesAsync();
+        }
 
         TempData["Success"] = "Veranstaltung angelegt.";
         return RedirectToAction(nameof(Details), new { id = ev.Id });
@@ -138,13 +159,15 @@ public class EventsController : AuthorizedControllerBase
             return Forbid();
         }
 
+        ViewBag.AllUsers = await Db.Users.OrderBy(u => u.Username).ToListAsync();
+        ViewBag.CoordinatorIds = ev.Coordinators.Select(c => c.UserId).ToList();
         return View("EventForm", ev);
     }
 
     [Authorize(Roles = "Admin,EventCoordinator")]
     [HttpPost]
     [ValidateAntiForgeryToken]
-    public async Task<IActionResult> Edit(int id, Event form)
+    public async Task<IActionResult> Edit(int id, Event form, int[]? coordinatorUserIds)
     {
         var ev = await Db.Events.FindAsync(id);
         if (ev == null)
@@ -161,6 +184,8 @@ public class EventsController : AuthorizedControllerBase
         if (error != null)
         {
             TempData["Error"] = error;
+            ViewBag.AllUsers = await Db.Users.OrderBy(u => u.Username).ToListAsync();
+            ViewBag.CoordinatorIds = ev.Coordinators.Select(c => c.UserId).ToList();
             form.Id = id;
             return View("EventForm", form);
         }
@@ -170,6 +195,32 @@ public class EventsController : AuthorizedControllerBase
         ev.Description = HtmlSanitizer.Sanitize(form.Description);
         ev.StartsAt = form.StartsAt;
         ev.EndsAt = form.EndsAt;
+
+        // Update coordinators
+        var existingCoordinatorIds = ev.Coordinators.Select(c => c.UserId).ToList();
+        var newUserIds = coordinatorUserIds ?? Array.Empty<int>();
+
+        // Remove assignments for users no longer selected
+        foreach (var assignment in ev.Coordinators.Where(c => !newUserIds.Contains(c.UserId)).ToList())
+        {
+            Db.EventCoordinatorAssignments.Remove(assignment);
+        }
+
+        // Add new assignments
+        foreach (var userId in newUserIds.Where(uid => !existingCoordinatorIds.Contains(uid)))
+        {
+            var user = await Db.Users.FindAsync(userId);
+            if (user != null)
+            {
+                user.IsEventCoordinator = true;
+                Db.EventCoordinatorAssignments.Add(new EventCoordinatorAssignment
+                {
+                    UserId = userId,
+                    EventId = ev.Id,
+                    AssignedAt = DateTime.UtcNow
+                });
+            }
+        }
 
         await Db.SaveChangesAsync();
 

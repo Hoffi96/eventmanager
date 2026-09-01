@@ -41,7 +41,7 @@
           @Html.AntiForgeryToken()
           <div class="mb-3">
             <label class="form-label">Veranstaltung *</label>
-            <select name="EventId" class="form-select" required>
+            <select name="EventId" class="form-select" required id="EventSelect">
               <option value="">-- auswählen --</option>
               @foreach (var ev in events)
               {
@@ -65,11 +65,13 @@
           <div class="row">
             <div class="col-md-6 mb-3">
               <label class="form-label">Start *</label>
-              <input type="datetime-local" name="StartsAt" class="form-control" required value="@startValue">
+              <input type="datetime-local" name="StartsAt" class="form-control" required value="@startValue" id="StartsAt">
+              <div class="form-text" id="StartHint"></div>
             </div>
             <div class="col-md-6 mb-3">
               <label class="form-label">Ende *</label>
-              <input type="datetime-local" name="EndsAt" class="form-control" required value="@endValue">
+              <input type="datetime-local" name="EndsAt" class="form-control" required value="@endValue" id="EndsAt">
+              <div class="form-text" id="EndHint"></div>
             </div>
           </div>
           <div class="mb-3">
@@ -104,5 +106,44 @@
     document.getElementById('taskForm').addEventListener('submit', function () {
       document.getElementById('DescriptionInput').value = descriptionQuill.root.innerHTML;
     });
+
+    // Event-Daten für Validierung
+    var eventTimes = {
+      @foreach (var ev in events)
+      {
+          <text>@ev.Id: { min: "@ev.StartsAt.ToString("yyyy-MM-ddTHH:mm")", max: "@ev.EndsAt.ToString("yyyy-MM-ddTHH:mm")" },</text>
+      }
+    };
+
+    function updateDateTimeLimits() {
+      var eventId = document.getElementById('EventSelect').value;
+      var startsAt = document.getElementById('StartsAt');
+      var endsAt = document.getElementById('EndsAt');
+      var startHint = document.getElementById('StartHint');
+      var endHint = document.getElementById('EndHint');
+
+      if (eventTimes[eventId]) {
+        var min = eventTimes[eventId].min;
+        var max = eventTimes[eventId].max;
+
+        startsAt.min = min;
+        startsAt.max = max;
+        endsAt.min = min;
+        endsAt.max = max;
+
+        startHint.textContent = "Erlaubter Zeitraum: " + min.replace('T', ' ') + " bis " + max.replace('T', ' ');
+        endHint.textContent = "Erlaubter Zeitraum: " + min.replace('T', ' ') + " bis " + max.replace('T', ' ');
+      } else {
+        startsAt.min = "";
+        startsAt.max = "";
+        endsAt.min = "";
+        endsAt.max = "";
+        startHint.textContent = "";
+        endHint.textContent = "";
+      }
+    }
+
+    document.getElementById('EventSelect').addEventListener('change', updateDateTimeLimits);
+    updateDateTimeLimits();
   </script>
 }
