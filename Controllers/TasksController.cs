@@ -27,12 +27,23 @@ public class TasksController : AuthorizedControllerBase
         return View(BuildList(tasks).ToList());
     }
 
-    public async Task<IActionResult> Schedule(string filter = "all")
+    public async Task<IActionResult> Schedule(string filter = "all", int? userId = null)
     {
         var tasks = await QueryTasksAsync();
-        var filteredTasks = filter == "assigned"
-            ? tasks.Where(task => task.Assignments.Any(a => a.UserId == CurrentUserId)).ToList()
-            : tasks.ToList();
+        List<TaskItem> filteredTasks;
+
+        if (userId.HasValue && userId.Value > 0)
+        {
+            filteredTasks = tasks.Where(task => task.Assignments.Any(a => a.UserId == userId.Value)).ToList();
+        }
+        else if (filter == "assigned")
+        {
+            filteredTasks = tasks.Where(task => task.Assignments.Any(a => a.UserId == CurrentUserId)).ToList();
+        }
+        else
+        {
+            filteredTasks = tasks.ToList();
+        }
 
         var model = filteredTasks
             .GroupBy(task => task.StartsAt.Date)
@@ -45,6 +56,8 @@ public class TasksController : AuthorizedControllerBase
             .ToList();
 
         ViewBag.Filter = filter == "assigned" ? "assigned" : "all";
+        ViewBag.UserId = userId;
+        ViewBag.AllUsers = await Db.Users.OrderBy(u => u.Username).ToListAsync();
         return View(model);
     }
 
@@ -236,6 +249,47 @@ public class TasksController : AuthorizedControllerBase
         if (!string.IsNullOrWhiteSpace(text))
         {
             Db.Comments.Add(new Comment { TaskId = id, UserId = CurrentUserId, Body = text.Trim(), CreatedAt = DateTime.UtcNow });
+            await Db.SaveChangesAsync();
+        }
+        return RedirectToAction(nameof(Details), new { id });
+    }
+
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AssignUser(int id, int userId)
+    {
+        var task = await Db.Tasks.Include(t => t.Assignments).FirstOrDefaultAsync(t => t.Id == id);
+        if (task is null)
+            return NotFound();
+        if (!IsAdmin && !await CanManageEventAsync(task.EventId))
+            return Forbid();
+
+        var user = await Db.Users.FindAsync(userId);
+        if (user is null)
+            return NotFound();
+
+        if (!task.Assignments.Any(a => a.UserId == userId) && task.Assignments.Count < task.MaxAssignees)
+        {
+            Db.TaskAssignments.Add(new TaskAssignment { TaskId = id, UserId = userId, AssignedAt = DateTime.UtcNow });
+            await Db.SaveChangesAsync();
+        }
+        return RedirectToAction(nameof(Details), new { id });
+    }
+
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> UnassignUser(int id, int userId)
+    {
+        var task = await Db.Tasks.FirstOrDefaultAsync(t => t.Id == id);
+        if (task is null)
+            return NotFound();
+        if (!IsAdmin && !await CanManageEventAsync(task.EventId))
+            return Forbid();
+
+        var assignment = await Db.TaskAssignments.FirstOrDefaultAsync(a => a.TaskId == id && a.UserId == userId);
+        if (assignment is not null)
+        {
+            Db.TaskAssignments.Remove(assignment);
             await Db.SaveChangesAsync();
         }
         return RedirectToAction(nameof(Details), new { id });

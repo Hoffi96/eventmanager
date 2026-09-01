@@ -10,12 +10,19 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllersWithViews();
 
-builder.Services.AddDbContextFactory<AppDbContext>(options =>
-    options.UseSqlite("Data Source=/app/data/helferapp.db"));
+var dbPath = builder.Environment.IsDevelopment()
+    ? "helferapp.db"
+    : "/app/data/helferapp.db";
 
-builder.Services.AddDataProtection()
-    .PersistKeysToFileSystem(new DirectoryInfo("/app/data/keys"))
-    .SetApplicationName("eventmanagement");
+builder.Services.AddDbContextFactory<AppDbContext>(options =>
+    options.UseSqlite($"Data Source={dbPath}"));
+
+if (!builder.Environment.IsDevelopment())
+{
+    builder.Services.AddDataProtection()
+        .PersistKeysToFileSystem(new DirectoryInfo("/app/data/keys"))
+        .SetApplicationName("eventmanagement");
+}
 
 builder.Services.Configure<ReminderOptions>(builder.Configuration.GetSection("Reminders"));
 builder.Services.AddScoped<IEmailService, SmtpEmailService>();

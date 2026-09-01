@@ -1,22 +1,47 @@
 @model List<ScheduleDayVm>
+@using HelferApp.Models
 @{
     ViewData["Title"] = "Zeitplan";
     var currentFilter = (string?)ViewBag.Filter ?? "all";
+    var currentUserId = (int?)ViewBag.UserId;
+    var allUsers = (List<User>)ViewBag.AllUsers;
+    var activeFilterLabel = currentUserId.HasValue
+        ? (allUsers.FirstOrDefault(u => u.Id == currentUserId.Value)?.Username ?? "Unbekannter Benutzer")
+        : (currentFilter == "assigned" ? "Nur meine Aufgaben" : "Alle Aufgaben");
 }
 
 <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap mb-2">
     <div>
         <h2 class="mb-1">Zeitplan</h2>
-        <div class="text-muted">Aufgaben im Überblick, optional auf deine Zuordnungen gefiltert.</div>
+        <div class="text-muted">Aufgaben im Überblick, optional auf deine Zuordnungen gefiltert.</div>
     </div>
-    <div class="btn-group" role="group" aria-label="Zeitplan Filter">
-        <a class="btn @(currentFilter == "all" ? "btn-primary" : "btn-outline-primary")" href="/Tasks/Schedule?filter=all">Alle Aufgaben</a>
-        <a class="btn @(currentFilter == "assigned" ? "btn-primary" : "btn-outline-primary")" href="/Tasks/Schedule?filter=assigned">Nur meine Aufgaben</a>
+    <div class="d-flex gap-2 flex-wrap align-items-center">
+        <div class="btn-group" role="group" aria-label="Zeitplan Filter">
+            <a class="btn @(currentFilter == "all" && !currentUserId.HasValue ? "btn-primary" : "btn-outline-primary")" href="/Tasks/Schedule?filter=all">Alle Aufgaben</a>
+            <a class="btn @(currentFilter == "assigned" ? "btn-primary" : "btn-outline-primary")" href="/Tasks/Schedule?filter=assigned">Nur meine Aufgaben</a>
+        </div>
+        @if (User.IsInRole("Admin"))
+        {
+            <select class="form-select" style="width: auto;" onchange="window.location.href=this.value ? '/Tasks/Schedule?userId=' + this.value : '/Tasks/Schedule?filter=all'">
+                <option value="">Alle Benutzer</option>
+                @foreach (var user in allUsers.OrderBy(u => u.Username))
+                {
+                    if (currentUserId == user.Id)
+                    {
+                        <option value="@user.Id" selected>@user.Username</option>
+                    }
+                    else
+                    {
+                        <option value="@user.Id">@user.Username</option>
+                    }
+                }
+            </select>
+        }
     </div>
 </div>
 
 <div class="small text-muted mb-3">
-    Aktiver Filter: <strong>@(currentFilter == "assigned" ? "Nur meine Aufgaben" : "Alle Aufgaben")</strong>
+    Aktiver Filter: <strong>@activeFilterLabel</strong>
 </div>
 
 @if (!Model.Any())
